@@ -476,19 +476,20 @@ from html.parser import HTMLParser  # noqa: E402
 
 
 def _find_claude():
-    """定位本机 Claude Code CLI（无则返回 None）"""
+    """定位本机 Claude Code CLI：只接受可执行类型（.ps1/.cmd/.exe），
+    绝不返回无扩展名的 Unix sh 包装脚本（Windows 无法直接执行，WinError 193）"""
     p = os.environ.get('CLAUDE_CMD', '')
-    if p:
+    if p and os.path.exists(p):
         return p
-    for c in ('claude.cmd', 'claude.exe', 'claude'):
-        w = shutil.which(c)
-        if w:
-            return w
-    appdata = os.environ.get('APPDATA', '')
+    appdata = os.environ.get('APPDATA', '')          # npm 全局安装的标准位置（Windows）
     if appdata:
         cand = os.path.join(appdata, 'npm', 'claude.ps1')
         if os.path.exists(cand):
             return cand
+    for c in ('claude.exe', 'claude.cmd'):
+        w = shutil.which(c)
+        if w:
+            return w
     return None
 
 
@@ -556,22 +557,30 @@ def fetch_article(url, timeout=12):
         return ''
 
 
-def _claude(prompt):
-    """调用本机 Claude Code CLI（如经公司网关则用其模型），返回纯文本；不可用返回 ''"""
+def _claude(prompt, timeout=120):
+    """调用本机 Claude Code CLI；失败重试1次，带诊断输出；不可用返回 ''"""
     if not CLAUDE_PS1:
         return ''
     if CLAUDE_PS1.endswith('.ps1'):
         cmd = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
                '-File', CLAUDE_PS1, '-p', prompt]
+    elif CLAUDE_PS1.endswith('.cmd') or CLAUDE_PS1.endswith('.bat'):
+        cmd = ['cmd.exe', '/c', CLAUDE_PS1, '-p', prompt]
     else:
         cmd = [CLAUDE_PS1, '-p', prompt]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           encoding='utf-8', errors='replace', timeout=60)
-        out = (r.stdout or '').strip()
-        return ' '.join(out.split()) if out else ''
-    except Exception:  # noqa: BLE001
-        return ''
+    for attempt in (1, 2):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding='utf-8', errors='replace', timeout=timeout)
+            out = (r.stdout or '').strip()
+            if out:
+                return ' '.join(out.split())
+            print('[claude] 第%d次返回空' % attempt)
+        except subprocess.TimeoutExpired:
+            print('[claude] 第%d次超时(%ds)' % (attempt, timeout))
+        except Exception as e:  # noqa: BLE001
+            print('[claude] 异常: %s' % str(e)[:100])
+    return ''
 
 
 def _summarize_api(prompt):
@@ -641,6 +650,23 @@ def summarize(title, text):
         summary = _strip_meta(summary)
         if title_cn and title_cn == title:
             title_cn = None        # 未翻译（本来就是中文）
+        # ---- 语言保真：模型不听话时强制重译（海外内容必须给中文） ----
+        if summary and not _has_cjk(summary):
+            s2 = _summarize_api('把下面的内容翻译成精炼中文摘要（1~3句、120字内，'
+                                '禁止媒体名/记者名/日期）：\n' + title + '\n' + summary)
+            if not s2 and mode in ('auto', 'claude'):
+                s2 = _claude('把下面的内容翻译成精炼中文摘要（1~3句、120字内，'
+                             '禁止媒体名/记者名/日期）：\n' + title + '\n' + summary)
+            if s2 and _has_cjk(s2):
+                summary = _strip_meta(s2)
+        if not _has_cjk(title) and not title_cn:
+            t2 = _summarize_api('只输出译文本身：把这句新闻标题翻译成自然中文'
+                                '（产品名/型号保留原文）：' + title)
+            if not t2 and mode in ('auto', 'claude'):
+                t2 = _claude('只输出译文本身：把这句新闻标题翻译成自然中文'
+                             '（产品名/型号保留原文）：' + title)
+            if t2 and _has_cjk(t2):
+                title_cn = _strip_meta(t2.splitlines()[0])[:120]
         return title_cn, _sent_cut(summary, 220)   # 兜底保险（正常情况下模型输出≤120字，不会触发）
     if text:
         sents = re.split(r'(?<=[。！？!?])', text)[:3]
