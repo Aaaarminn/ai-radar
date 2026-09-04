@@ -64,8 +64,9 @@ def _load_config():
 
 
 CFG = _load_config()
-MIN_SCORE = int(CFG.get('min_score', 4))            # 入选门槛
-HIGH_SCORE = int(CFG.get('high_score', 7))          # 重大新闻：跳过攒批与冷却立即发
+MIN_SCORE = int(CFG.get('min_score', 4))            # 入选门槛（关键词预筛，控成本）
+HIGH_SCORE = int(CFG.get('high_score', 7))          # 关键词高分兜底（LLM 不可用时）
+HIGH_INFLUENCE = int(CFG.get('high_influence', 8))  # LLM 影响力≥此值：立即发+冷却豁免
 BATCH_MIN_ITEMS = int(CFG.get('batch_min_items', 6))  # 攒够 N 条发一封
 BATCH_MAX_AGE = int(CFG.get('batch_max_age_minutes', 300))  # 或最早一条已等 N 分钟
 MAX_PER_EMAIL = int(CFG.get('max_per_email', 12))   # 单封邮件（聚类后）最多条数
@@ -639,20 +640,27 @@ def _sent_cut(s, limit):
 
 
 def summarize(title, text):
-    """摘要链（OpenAI兼容API -> Claude CLI -> 抽取式兜底）。
-    返回 (中文标题或 None, 摘要)。英文标题会要求模型翻译，正文垃圾标签已清洗。"""
+    """理解式评估：通读正文后输出 (中文标题|None, 影响力1-10|None, 摘要)。
+    影响力标准：9-10 里程碑级（新旗舰模型/重磅开源/行业格局变化）；7-8 重要（大厂重要
+    版本或产品）；5-6 一般常规更新；4以下 边缘/营销/个案。抽取式兜底时影响力为 None。"""
     mode = (os.environ.get('SUMMARY_MODE') or CFG.get('summary_mode', 'auto')).lower()
     lang = (os.environ.get('SUMMARY_LANGUAGE') or CFG.get('summary_language', '中文'))
     excerpt = text[:1800]
-    prompt = ('严格按以下两行格式输出，不要任何其它内容：\n'
+    prompt = ('严格按以下三行格式输出，不要任何其它内容：\n'
               '中文标题：<把下面的新闻标题翻译成自然%s；若原标题已是%s则原样输出；'
               '产品名/型号保留原文；去掉标题里的媒体名/栏目名前缀>\n'
+              '影响力：<1-10整数。标尺：10=全球顶级实验室旗舰模型发布'
+              '（如 OpenAI GPT-6 Astra、Anthropic Claude 5.1 Fable、Gemini 旗舰）；'
+              '9=国产旗舰大模型发布（如 GLM-5.3、DeepSeek V4 Pro）；'
+              '8=重要衍生版本或旗舰级工具（如 GLM-5.3 Flash、DeepSeek V4 Flash、'
+              '官方重要框架/工具链）；7=大厂重要产品或功能更新、重要论文；'
+              '5-6=常规更新、第三方适配与集成；4以下=营销活动/客户个案/边缘话题>\n'
               '摘要：<用精炼的%s总结，1~3句、总共不超过120字；只保留最有信息量的要点'
               '（新东西是什么/谁做的/多强/关键数据），删除铺垫、修饰与重复；'
               '摘要里禁止出现媒体名、记者名、发布日期、"据报道"等一切来源信息；'
               '忽略正文里的HTML标签或代码垃圾>\n'
               '标题：%s\n正文节选：%s'
-              % (lang, lang, lang, title, excerpt if excerpt else '（无正文，按标题总结）'))
+              % (lang, lang, lang, title, excerpt if excerpt else '（无正文，按标题评估）'))
     s = ''
     if mode in ('auto', 'api', 'openai'):
         s = _summarize_api(prompt)
@@ -660,17 +668,19 @@ def summarize(title, text):
         s = _claude(prompt)
     if s:
         m_t = re.search(r'中文标题[:：]\s*(.+)', s)
+        m_i = re.search(r'影响力[:：]\s*[^0-9]*(\d{1,2})', s)
         m_s = re.search(r'摘要[:：]\s*([\s\S]+)', s)
         title_cn = None
         if m_t:
-            t = re.split(r'\s*摘要[:：]', m_t.group(1))[0].strip()   # 模型并作一行时截断粘连
+            t = re.split(r'\s*(?:影响力|摘要)[:：]', m_t.group(1))[0].strip()
             title_cn = t[:120] or None
+        influence = min(10, max(1, int(m_i.group(1)))) if m_i else None
         summary = m_s.group(1).strip() if m_s else s.strip()
-        title_cn = _strip_meta(title_cn) if title_cn else None      # 防御性清洗残留样板
+        title_cn = _strip_meta(title_cn) if title_cn else None
         summary = _strip_meta(summary)
         if title_cn and title_cn == title:
-            title_cn = None        # 未翻译（本来就是中文）
-        # ---- 语言保真：模型不听话时强制重译（海外内容必须给中文） ----
+            title_cn = None
+        # ---- 语言保真：模型不听话时强制重译 ----
         if summary and not _has_cjk(summary):
             s2 = _summarize_api('把下面的内容翻译成精炼中文摘要（1~3句、120字内，'
                                 '禁止媒体名/记者名/日期）：\n' + title + '\n' + summary)
@@ -687,11 +697,11 @@ def summarize(title, text):
                              '（产品名/型号保留原文）：' + title)
             if t2 and _has_cjk(t2):
                 title_cn = _strip_meta(t2.splitlines()[0])[:120]
-        return title_cn, _sent_cut(summary, 220)   # 兜底保险（正常情况下模型输出≤120字，不会触发）
+        return title_cn, influence, _sent_cut(summary, 220)
     if text:
         sents = re.split(r'(?<=[。！？!?])', text)[:3]
-        return None, _sent_cut(''.join(sents), 200)
-    return None, ''
+        return None, None, _sent_cut(''.join(sents), 200)
+    return None, None, ''
 
 
 # ---------------------------------------------------------------- 主题聚类（同一事件多条报道 -> 一条）
@@ -708,10 +718,15 @@ def cluster_key(title):
     return None
 
 
+def _prio(x):
+    """排序/触发优先级：LLM 影响力优先，关键词分兜底"""
+    return x.get('influence') or 0, x.get('score') or 0
+
+
 def cluster_items(items):
-    """同主题多条 -> 最高分领衔 + 相关报道计数；返回按分数排序、截断 MAX_PER_EMAIL"""
+    """同主题多条 -> 影响力最高者领衔 + 相关报道计数；按优先级排序、截断 MAX_PER_EMAIL"""
     singles, groups = [], {}
-    for it in sorted(items, key=lambda x: x.get('score', 0), reverse=True):
+    for it in sorted(items, key=_prio, reverse=True):
         k = cluster_key(it['title'])
         if k is None:
             singles.append(it)
@@ -727,7 +742,7 @@ def cluster_items(items):
         lead['_related_n'] = len(lst) - 1
         merged.append(lead)
     out = singles + merged
-    out.sort(key=lambda x: x.get('score', 0), reverse=True)
+    out.sort(key=_prio, reverse=True)
     return out[:MAX_PER_EMAIL]
 
 
@@ -874,24 +889,32 @@ def main():
         print('基线建立完成：记录 %d 条当前条目，本次不推送。' % len(fresh))
         return
 
-    # ---- 新条目入待发池（同时记 seen 防重复抓取） ----
+    # ---- 新条目：理解式评估（GLM 通读正文 -> 中文标题/影响力/摘要）后入待发池 ----
     now_ms = int(time.time() * 1000)
     pending = state.setdefault('pending', [])
-    for it in fresh:
+    for i, it in enumerate(fresh):
         state['seen'][it['_key']] = it['title'][:80]
+        art = fetch_article(it['link'])
+        it['title_cn'], it['influence'], it['summary'] = summarize(it['title'], art)
+        print('  评估%d/%d 影响%s %s' % (i + 1, len(fresh),
+                                         it.get('influence') or '-',
+                                         (it.get('title_cn') or it['title'])[:38]))
         pending.append({'title': it['title'], 'link': it['link'], 'source': it['source'],
                         'group': it.get('group', ''), '_key': it['_key'],
                         '_ts': now_ms, 'score': it.get('score', 0),
-                        '_dt': _dt_ms(it.get('dt'))})   # 发布时间入池，显示用
+                        '_dt': _dt_ms(it.get('dt')),
+                        'title_cn': it.get('title_cn'), 'summary': it.get('summary', ''),
+                        'influence': it.get('influence')})
 
     if not pending:
         print('无新消息（待发池空）。')
         save_state(state)
         return
 
-    # ---- 发送节奏控制：日均约 3 封；重大新闻立即发；闲时攒批 ----
+    # ---- 发送节奏：影响力≥8 立即发（允许大更新连续推送）；普通消息攒批+冷却 ----
     oldest_age = (now_ms - min(p['_ts'] for p in pending)) / 60000.0
-    has_high = any(p.get('score', 0) >= HIGH_SCORE for p in pending)
+    has_high = any((p.get('influence') or 0) >= HIGH_INFLUENCE
+                   or p.get('score', 0) >= HIGH_SCORE for p in pending)
     since_last = (now_ms - state.get('last_sent', 0)) / 60000.0
 
     send = (args.send_now or has_high
@@ -906,13 +929,12 @@ def main():
         save_state(state)
         return
 
-    # ---- 聚类（同一事件多条报道合成一条）+ 摘要 + 发送 ----
+    # ---- 聚类（同一事件多条报道合成一条，影响力最高者领衔）+ 发送 ----
     chosen = cluster_items(pending)
     for i, it in enumerate(chosen[:SUMMARY_LIMIT]):
-        art = fetch_article(it['link'])
-        it['title_cn'], it['summary'] = summarize(it['title'], art)
-        print('  摘要 %d/%d %s' % (i + 1, min(len(chosen), SUMMARY_LIMIT),
-                                   (it.get('title_cn') or it['title'])[:40]))
+        if not it.get('summary'):        # 老池子里的条目（评估机制上线前入池）补摘要
+            art = fetch_article(it['link'])
+            it['title_cn'], it['influence'], it['summary'] = summarize(it['title'], art)
 
     subject = '🤖 AI 雷达：%d 条动态' % len(chosen)
     if len(pending) > len(chosen):

@@ -70,7 +70,8 @@ powershell -ExecutionPolicy Bypass -File install-task.ps1   # 注册 :00/:30 定
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `min_score` | 4 | 入选门槛，调高更严 |
-| `high_score` | 7 | 重大新闻线（立即发） |
+| `high_score` | 7 | 关键词高分兜底线（LLM 不可用时） |
+| `high_influence` | 8 | LLM 影响力线：≥此值立即发+冷却豁免（标尺：10=全球旗舰发布，9=国产旗舰，8=重要衍生/旗舰工具） |
 | `batch_min_items` | 6 | 攒几条发一封 |
 | `batch_max_age_minutes` | 300 | 最老条目等待上限 |
 | `send_cooldown_minutes` | 90 | 两封普通邮件最小间隔 |
