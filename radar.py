@@ -251,15 +251,22 @@ def push_wxpusher(token, uid, title, content):
     return resp.get('code') == 1000
 
 
-def push_smtp(cfg, title, content):
-    """邮件通道（免费不限量）：QQ邮箱等 SMTP"""
+def push_smtp(cfg, title, items):
+    """邮件通道：HTML 卡片排版 + 纯文本降级（免费不限量）"""
     import smtplib
-    from email.mime.text import MIMEText
     from email.header import Header
-    msg = MIMEText(_cut(content, 20000), 'plain', 'utf-8')
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    if isinstance(items, str):
+        html, plain = '<pre style="font-family:sans-serif;">%s</pre>' % _esc(items), items
+    else:
+        html, plain = build_html(title, items), build_plain(items)
+    msg = MIMEMultipart('alternative')
     msg['Subject'] = Header(title, 'utf-8')
     msg['From'] = cfg['user']
     msg['To'] = cfg['to']
+    msg.attach(MIMEText(plain, 'plain', 'utf-8'))
+    msg.attach(MIMEText(html, 'html', 'utf-8'))
     cls = smtplib.SMTP_SSL if str(cfg.get('port', '465')) == '465' else smtplib.SMTP
     with cls(cfg['host'], int(cfg.get('port', 465)), timeout=25) as s:
         s.login(cfg['user'], cfg['pass'])
@@ -274,23 +281,28 @@ def push_pushplus(token, title, content):
     return resp.get('code') == 200
 
 
-def push(title, content):
-    """按已配置的通道推送（优先级：企业微信 > Server酱 > 邮件 > WxPusher > PushPlus）
+def push(title, items):
+    """按已配置的通道推送。items 为条目列表时各通道自动排版（邮件=HTML卡片，
+    企微/Server酱等=Markdown）；items 为字符串时按原文发送。
     配置来源：环境变量 或 secrets.local.json（适配计划任务等无环境变量场景）"""
     try:
         if _sec('WECOM_WEBHOOK'):
-            return push_wecom(_sec('WECOM_WEBHOOK'), title, content)
+            c = items if isinstance(items, str) else build_markdown(items)
+            return push_wecom(_sec('WECOM_WEBHOOK'), title, c)
         if _sec('SERVERCHAN_KEY'):
-            return push_serverchan(_sec('SERVERCHAN_KEY'), title, content)
+            c = items if isinstance(items, str) else build_markdown(items)
+            return push_serverchan(_sec('SERVERCHAN_KEY'), title, c)
         smtp = {'host': _sec('SMTP_HOST'), 'port': _sec('SMTP_PORT') or '465',
                 'user': _sec('SMTP_USER'), 'pass': _sec('SMTP_PASS'),
                 'to': _sec('SMTP_TO')}
         if smtp['host'] and smtp['user'] and smtp['pass'] and smtp['to']:
-            return push_smtp(smtp, title, content)
+            return push_smtp(smtp, title, items)
         if _sec('WXPUSHER_TOKEN') and _sec('WXPUSHER_UID'):
-            return push_wxpusher(_sec('WXPUSHER_TOKEN'), _sec('WXPUSHER_UID'), title, content)
+            c = items if isinstance(items, str) else build_markdown(items)
+            return push_wxpusher(_sec('WXPUSHER_TOKEN'), _sec('WXPUSHER_UID'), title, c)
         if _sec('PUSHPLUS_TOKEN'):
-            return push_pushplus(_sec('PUSHPLUS_TOKEN'), title, content)
+            c = items if isinstance(items, str) else build_markdown(items)
+            return push_pushplus(_sec('PUSHPLUS_TOKEN'), title, c)
         print('[push] 未配置任何通道（WECOM_WEBHOOK / SERVERCHAN_KEY / SMTP_* / WXPUSHER_* / PUSHPLUS_TOKEN）')
         return False
     except Exception as e:  # noqa: BLE001
@@ -298,30 +310,103 @@ def push(title, content):
         return False
 
 
-def build_message(fresh):
+def _esc(s):
+    return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def _tstr(it):
+    dt = it.get('dt')
+    if dt:
+        return dt.strftime('%m-%d %H:%M')
+    if it.get('_ts'):
+        return time.strftime('%m-%d %H:%M', time.localtime(it['_ts'] / 1000))
+    return ''
+
+
+def _group_items(items):
     groups = {}
-    for it in fresh:
+    for it in items:
         groups.setdefault(it.get('group') or '其它', []).append(it)
+    return groups
+
+
+def build_markdown(items):
+    """Markdown 排版（企微/Server酱/PushPlus/WxPusher 用）"""
     lines = []
-    for g in sorted(groups):
-        lines.append('**%s**' % g)
-        for it in groups[g]:
-            dt = it.get('dt')
-            if dt:
-                tstr = dt.strftime('%m-%d %H:%M')
-            elif it.get('_ts'):
-                tstr = time.strftime('%m-%d %H:%M', time.localtime(it['_ts'] / 1000))
-            else:
-                tstr = ''
-            lines.append('- %s（%s %s）' % (it['title'], it.get('source', ''), tstr))
+    for g, lst in sorted(_group_items(items).items()):
+        lines.append('**▎%s**' % g)
+        for it in lst:
+            lines.append('- **%s**（%s %s）' % (it['title'], it.get('source', ''), _tstr(it)))
             if it.get('summary'):
-                lines.append('  摘要：%s' % it['summary'])
+                lines.append('  > %s' % it['summary'])
             if it.get('_related_n'):
-                lines.append('  └ 相关报道 %d 条：%s' % (it['_related_n'], '；'.join(it['_related'])))
+                lines.append('  > └ 相关报道 %d 条：%s' % (it['_related_n'], '；'.join(it['_related'])))
             if it.get('link'):
-                lines.append('  链接：%s' % it['link'])
+                lines.append('  > [阅读原文](%s)' % it['link'])
         lines.append('')
     return '\n'.join(lines).strip()
+
+
+def build_plain(items):
+    """纯文本排版（邮件降级/无 HTML 客户端用）"""
+    out = []
+    for i, it in enumerate(items, 1):
+        out.append('[%02d] %s' % (i, it['title']))
+        out.append('     %s · %s' % (it.get('source', ''), _tstr(it)))
+        if it.get('summary'):
+            out.append('     摘要：%s' % it['summary'])
+        if it.get('_related_n'):
+            out.append('     └ 相关报道 %d 条：%s' % (it['_related_n'], '；'.join(it['_related'])))
+        if it.get('link'):
+            out.append('     原文：%s' % it['link'])
+        out.append('')
+    return '\n'.join(out).strip()
+
+
+def build_html(title, items):
+    """HTML 邮件排版（卡片式，内联样式兼容各邮箱客户端）"""
+    css_card = ('style="background:#ffffff;border:1px solid #e3e8ee;border-radius:10px;'
+                'padding:14px 16px;margin:0 0 12px 0;font-family:-apple-system,'
+                "'PingFang SC','Microsoft YaHei',sans-serif;\"")
+    parts = [
+        '<div style="max-width:640px;margin:0 auto;font-family:-apple-system,'
+        "'PingFang SC','Microsoft YaHei',sans-serif;\">",
+        '<div style="background:#01579B;border-radius:10px 10px 0 0;color:#ffffff;'
+        'padding:16px 20px;">'
+        '<div style="font-size:18px;font-weight:bold;">🤖 %s</div>'
+        '<div style="font-size:12px;opacity:.85;margin-top:4px;">%s · 共 %d 条'
+        '</div></div>' % (_esc(title),
+                          time.strftime('%Y-%m-%d %H:%M'), len(items)),
+        '<div style="background:#f4f7fa;border-radius:0 0 10px 10px;padding:14px 12px;">',
+    ]
+    for g, lst in sorted(_group_items(items).items()):
+        parts.append('<div style="font-size:12px;color:#5f6b7a;font-weight:bold;'
+                     'letter-spacing:2px;margin:10px 4px 8px;">▎%s</div>' % _esc(g))
+        for it in lst:
+            parts.append('<div %s>' % css_card)
+            parts.append('<div style="font-size:15px;font-weight:bold;color:#1a232c;'
+                         'line-height:1.5;">%s</div>' % _esc(it['title']))
+            parts.append('<div style="font-size:12px;color:#8a95a1;margin:4px 0 8px;">'
+                         '%s · %s</div>' % (_esc(it.get('source', '')), _tstr(it)))
+            if it.get('summary'):
+                parts.append('<div style="font-size:13px;color:#37424e;line-height:1.7;'
+                             'background:#f8fafc;border-left:3px solid #0288D1;'
+                             'padding:8px 10px;border-radius:0 6px 6px 0;">%s</div>'
+                             % _esc(it['summary']))
+            if it.get('_related_n'):
+                parts.append('<div style="font-size:12px;color:#8a95a1;margin-top:6px;">'
+                             '└ 相关报道 %d 条：%s</div>'
+                             % (it['_related_n'], _esc('；'.join(it['_related']))))
+            if it.get('link'):
+                parts.append('<a href="%s" style="display:inline-block;font-size:12px;'
+                             'color:#0288D1;text-decoration:none;margin-top:8px;'
+                             'border:1px solid #b3d7f2;border-radius:6px;padding:3px 10px;">'
+                             '阅读原文 →</a>' % _esc(it['link']))
+            parts.append('</div>')
+    parts.append('<div style="text-align:center;font-size:11px;color:#a5b0bc;'
+                 'padding:10px 0 4px;">由 AI-Radar 自动生成 · 评分过滤 / 主题聚类 / LLM 摘要</div>')
+    parts.append('</div></div>')
+    return ''.join(parts)
 
 
 # ---------------------------------------------------------------- 相关性评分
@@ -706,7 +791,7 @@ def main():
     subject = '🤖 AI 雷达：%d 条动态' % len(chosen)
     if len(pending) > len(chosen):
         subject += '（聚合自 %d 条报道）' % len(pending)
-    ok = push(subject, build_message(chosen))
+    ok = push(subject, chosen)
     if ok:
         state['pending'] = []
         state['last_sent'] = now_ms
