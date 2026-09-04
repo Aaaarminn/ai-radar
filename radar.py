@@ -644,7 +644,10 @@ def summarize(title, text):
     if s:
         m_t = re.search(r'中文标题[:：]\s*(.+)', s)
         m_s = re.search(r'摘要[:：]\s*([\s\S]+)', s)
-        title_cn = m_t.group(1).strip()[:120] if m_t else None
+        title_cn = None
+        if m_t:
+            t = re.split(r'\s*摘要[:：]', m_t.group(1))[0].strip()   # 模型并作一行时截断粘连
+            title_cn = t[:120] or None
         summary = m_s.group(1).strip() if m_s else s.strip()
         title_cn = _strip_meta(title_cn) if title_cn else None      # 防御性清洗残留样板
         summary = _strip_meta(summary)
