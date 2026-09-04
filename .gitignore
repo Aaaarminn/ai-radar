@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+state.json.tmp
+
+.smtp-setup/
+secrets.local.json
+state.json

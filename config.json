@@ -1,0 +1,12 @@
+{
+  "min_score": 4,
+  "high_score": 7,
+  "batch_min_items": 6,
+  "batch_max_age_minutes": 300,
+  "max_per_email": 12,
+  "summary_limit": 8,
+  "send_cooldown_minutes": 90,
+  "old_cutoff_days": 7,
+  "summary_mode": "auto",
+  "summary_language": "中文"
+}
