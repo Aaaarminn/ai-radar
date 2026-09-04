@@ -314,10 +314,24 @@ def _esc(s):
     return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
+def _dt_ms(dt):
+    """发布时间 -> 毫秒时间戳（入待发池时保留；naive 视为 UTC）"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
 def _tstr(it):
+    """显示时间 = 信息发布时间（优先）；无发布时间才退回采集时间"""
     dt = it.get('dt')
-    if dt:
-        return dt.strftime('%m-%d %H:%M')
+    if dt is None and it.get('_dt'):
+        dt = datetime.datetime.fromtimestamp(it['_dt'] / 1000, datetime.timezone.utc)
+    if dt is not None:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone().strftime('%m-%d %H:%M')
     if it.get('_ts'):
         return time.strftime('%m-%d %H:%M', time.localtime(it['_ts'] / 1000))
     return ''
@@ -866,7 +880,8 @@ def main():
         state['seen'][it['_key']] = it['title'][:80]
         pending.append({'title': it['title'], 'link': it['link'], 'source': it['source'],
                         'group': it.get('group', ''), '_key': it['_key'],
-                        '_ts': now_ms, 'score': it.get('score', 0)})
+                        '_ts': now_ms, 'score': it.get('score', 0),
+                        '_dt': _dt_ms(it.get('dt'))})   # 发布时间入池，显示用
 
     if not pending:
         print('无新消息（待发池空）。')
