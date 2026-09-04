@@ -1,0 +1,66 @@
+[
+  { "name": "OpenAI 官方博客",   "group": "海外官方", "url": "https://openai.com/news/rss.xml", "max_items": 10 },
+  { "name": "OpenAI 平台更新",   "group": "海外官方", "url": "{rsshub}/openai/changelog", "enabled": false, "_note": "公共RSSHub实例该路由503；官方博客RSS已覆盖" },
+  { "name": "Anthropic 官方新闻", "group": "海外官方", "url": "{rsshub}/anthropic/news" },
+  { "name": "DeepMind 博客",     "group": "海外官方", "url": "https://deepmind.google/blog/rss.xml", "max_items": 10 },
+  { "name": "xAI 新闻",          "group": "海外官方", "url": "{rsshub}/xai/news", "enabled": false, "_note": "无原生RSS且公共路由失效；Grok动态由HN/量子位覆盖" },
+  { "name": "Meta Llama",        "group": "海外官方", "url": "https://github.com/meta-llama/llama/releases.atom", "skip_score": true },
+  { "name": "OpenAI 开源权重",   "group": "海外官方", "url": "https://github.com/openai/gpt-oss/releases.atom", "skip_score": true },
+  { "name": "DeepSeek GitHub",   "group": "国产官方", "url": "https://github.com/deepseek-ai/DeepSeek-V3/tags.atom", "skip_score": true },
+  { "name": "智谱 GLM GitHub",   "group": "国产官方", "url": "https://github.com/zai-org/GLM-5/tags.atom", "enabled": false, "_note": "智谱/Qwen/Kimi 不走 GitHub 发版（实测 0 releases/tags），其动态由社区雷达与中文媒体源覆盖" },
+  { "name": "Qwen GitHub",       "group": "国产官方", "url": "https://github.com/QwenLM/Qwen3.8/tags.atom", "enabled": false, "_note": "同上" },
+  {
+    "name": "Hacker News 热帖",  "group": "社区雷达",
+    "url": "https://hnrss.org/newest?points=300&count=30",
+    "keywords": ["openai", "anthropic", "gpt-", "claude", "gemini", "deepmind", "deepseek",
+                 "glm", "qwen", "kimi", "grok", "llama", "mistral", "astra", "fable",
+                 "minimax", "doubao", "豆包", "通义"]
+  },
+  {
+    "name": "r/LocalLLaMA",      "group": "社区雷达",
+    "url": "https://www.reddit.com/r/LocalLLaMA/.rss",
+    "keywords": ["openai", "anthropic", "gpt", "claude", "gemini", "deepseek",
+                 "glm", "qwen", "kimi", "grok", "llama", "minimax"]
+  },
+  {
+    "name": "机器之心",          "group": "中文媒体", "url": "https://www.jiqizhixin.com/rss",
+    "enabled": false, "_note": "其 RSS 存在 XML 畸形无法稳定解析，需要时换 RSSHub 桥接",
+    "keywords": ["GPT", "Claude", "Gemini", "DeepSeek", "GLM", "智谱", "Qwen",
+                 "Kimi", "开源模型", "发布", "推理模型", "上下文"]
+  },
+  {
+    "name": "量子位",            "group": "中文媒体", "url": "https://www.qbitai.com/feed",
+    "keywords": ["GPT", "Claude", "Gemini", "DeepSeek", "GLM", "智谱", "Qwen",
+                 "Kimi", "发布", "开源"]
+  },
+  { "name": "Google 官方博客",   "group": "海外官方", "url": "https://blog.google/rss/",
+    "keywords": ["gemini", "deepmind", "google ai", "veo", "imagen", "notebooklm", "tpu", "gemma"] },
+  { "name": "Mistral 新闻",      "group": "海外官方", "url": "{rsshub}/mistral/news", "enabled": false, "_note": "无原生RSS且公共路由失效；由HN覆盖" },
+  { "name": "MiniMax 新闻",      "group": "国产官方", "url": "{rsshub}/minimax/news", "enabled": false, "_note": "无原生RSS且公共路由失效；由HN/量子位覆盖" },
+  { "name": "月之暗面新闻",      "group": "国产官方", "url": "{rsshub}/moonshot/news", "enabled": false, "_note": "无原生RSS且公共路由失效；由HN/量子位覆盖" },
+  {
+    "name": "LMArena 榜单",      "group": "社区雷达", "url": "https://lmarena.ai/leaderboard",
+    "type": "watch", "_note": "监视榜单页模型名变化，新模型上榜（含匿名被识破）即播报"
+  },
+  {
+    "name": "arXiv cs.AI",       "group": "论文雷达", "url": "http://export.arxiv.org/rss/cs.AI",
+    "enabled": false,
+    "_note": "原始流噪音不可过滤（普通论文摘要里引用 Qwen/DeepSeek 等模型名即误命中；RSS 无作者单位字段）。论文层由 HF 每日论文（精选）+ HN 热帖（重磅必上）承担。要强开改 enabled=true"
+  },
+  {
+    "name": "arXiv cs.CL",       "group": "论文雷达", "url": "http://export.arxiv.org/rss/cs.CL",
+    "enabled": false, "_note": "同上"
+  },
+  {
+    "name": "HF 每日论文",       "group": "论文雷达", "url": "{rsshub}/huggingface/daily-papers",
+    "max_items": 10,
+    "keywords": ["gpt-", "chatgpt", "claude", "gemini", "deepseek", "qwen", "glm-",
+                 "llama-", "kimi", "grok-", "minimax-", "mistral-"]
+  },
+  {
+    "name": "arXiv 重大论文",    "group": "论文雷达", "url": "https://hnrss.org/newest?points=150&count=30&q=arxiv.org",
+    "max_items": 5,
+    "keywords": ["arxiv"],
+    "_note": "arXiv 论文上了 HN 热帖才播报（>=150赞）：重大论文的自然过滤器"
+  }
+]
