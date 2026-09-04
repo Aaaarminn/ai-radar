@@ -598,7 +598,9 @@ def summarize(title, text):
     excerpt = text[:1800]
     prompt = ('严格按以下两行格式输出，不要任何其它内容：\n'
               '中文标题：<把下面的新闻标题翻译成自然%s；若原标题已是%s则原样输出；产品名/型号保留原文>\n'
-              '摘要：<不超过4句%s，说清：新东西是什么/谁做的/多强/意义；忽略正文里的HTML标签或代码垃圾>\n'
+              '摘要：<用精炼的%s总结，1~3句、总共不超过120字；只保留最有信息量的要点'
+              '（新东西是什么/谁做的/多强/关键数据），删除铺垫、修饰与重复；'
+              '忽略正文里的HTML标签或代码垃圾>\n'
               '标题：%s\n正文节选：%s'
               % (lang, lang, lang, title, excerpt if excerpt else '（无正文，按标题总结）'))
     s = ''
@@ -613,10 +615,10 @@ def summarize(title, text):
         summary = m_s.group(1).strip() if m_s else s.strip()
         if title_cn and title_cn == title:
             title_cn = None        # 未翻译（本来就是中文）
-        return title_cn, _sent_cut(summary, 500)
+        return title_cn, _sent_cut(summary, 220)   # 兜底保险（正常情况下模型输出≤120字，不会触发）
     if text:
-        sents = re.split(r'(?<=[。！？!?])', text)[:4]
-        return None, _sent_cut(''.join(sents), 300)
+        sents = re.split(r'(?<=[。！？!?])', text)[:3]
+        return None, _sent_cut(''.join(sents), 200)
     return None, ''
 
 
