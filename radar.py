@@ -323,6 +323,18 @@ def _tstr(it):
     return ''
 
 
+def _disp_title(it):
+    """主标题：中文标题优先"""
+    return it.get('title_cn') or it['title']
+
+
+def _orig_title(it):
+    """原题（仅当原标题为外文且已翻译时返回，用于副行展示）"""
+    if it.get('title_cn') and it['title_cn'] != it['title'] and not _has_cjk(it['title']):
+        return it['title']
+    return ''
+
+
 def _group_items(items):
     groups = {}
     for it in items:
@@ -336,7 +348,10 @@ def build_markdown(items):
     for g, lst in sorted(_group_items(items).items()):
         lines.append('**▎%s**' % g)
         for it in lst:
-            lines.append('- **%s**（%s %s）' % (it['title'], it.get('source', ''), _tstr(it)))
+            lines.append('- **%s**（%s %s）' % (_disp_title(it), it.get('source', ''), _tstr(it)))
+            orig = _orig_title(it)
+            if orig:
+                lines.append('  > 原题：%s' % orig)
             if it.get('summary'):
                 lines.append('  > %s' % it['summary'])
             if it.get('_related_n'):
@@ -351,8 +366,10 @@ def build_plain(items):
     """纯文本排版（邮件降级/无 HTML 客户端用）"""
     out = []
     for i, it in enumerate(items, 1):
-        out.append('[%02d] %s' % (i, it['title']))
-        out.append('     %s · %s' % (it.get('source', ''), _tstr(it)))
+        out.append('[%02d] %s' % (i, _disp_title(it)))
+        orig = _orig_title(it)
+        meta = '%s · %s' % (it.get('source', ''), _tstr(it))
+        out.append('     %s%s' % (meta, (' · 原题：' + orig) if orig else ''))
         if it.get('summary'):
             out.append('     摘要：%s' % it['summary'])
         if it.get('_related_n'):
@@ -385,9 +402,13 @@ def build_html(title, items):
         for it in lst:
             parts.append('<div %s>' % css_card)
             parts.append('<div style="font-size:15px;font-weight:bold;color:#1a232c;'
-                         'line-height:1.5;">%s</div>' % _esc(it['title']))
+                         'line-height:1.5;">%s</div>' % _esc(_disp_title(it)))
+            orig = _orig_title(it)
+            meta = '%s · %s' % (_esc(it.get('source', '')), _tstr(it))
+            if orig:
+                meta += ' · 原题：%s' % _esc(orig)
             parts.append('<div style="font-size:12px;color:#8a95a1;margin:4px 0 8px;">'
-                         '%s · %s</div>' % (_esc(it.get('source', '')), _tstr(it)))
+                         '%s</div>' % meta)
             if it.get('summary'):
                 parts.append('<div style="font-size:13px;color:#37424e;line-height:1.7;'
                              'background:#f8fafc;border-left:3px solid #0288D1;'
@@ -496,7 +517,7 @@ class _TextExtract(HTMLParser):
 
 
 def fetch_article(url, timeout=12):
-    """抓文章正文纯文本（最多 400KB，失败返回空串）"""
+    """抓文章正文纯文本（最多 400KB；清除残留 HTML 标签垃圾，失败返回空串）"""
     if not url or not url.startswith('http'):
         return ''
     try:
@@ -505,7 +526,10 @@ def fetch_article(url, timeout=12):
             html = r.read(400_000).decode('utf-8', errors='ignore')
         p = _TextExtract()
         p.feed(html)
-        return re.sub(r'\s+', ' ', ' '.join(p.parts))
+        text = ' '.join(p.parts)
+        text = re.sub(r'<[^>]{1,300}>', ' ', text)       # 网页里被转义的 <img id=... 等残留
+        text = re.sub(r'https?://\S{40,}', ' ', text)     # 正文里的超长裸链接
+        return re.sub(r'\s+', ' ', text).strip()
     except Exception:  # noqa: BLE001
         return ''
 
@@ -549,25 +573,51 @@ def _summarize_api(prompt):
         return ''
 
 
+def _has_cjk(s):
+    return any('\u4e00' <= c <= '\u9fff' for c in (s or ''))
+
+
+def _sent_cut(s, limit):
+    """超长时按句子边界截断（不切半句）"""
+    s = (s or '').strip()
+    if len(s) <= limit:
+        return s
+    head = s[:limit]
+    for stop in '。！？!?.；;':
+        i = head.rfind(stop)
+        if i > limit * 0.5:
+            return head[:i + 1]
+    return head.rstrip() + '…'
+
+
 def summarize(title, text):
-    """摘要链：OpenAI兼容API -> Claude CLI -> 抽取式兜底（模式/语言由 config 与 SUMMARY_MODE 控制）"""
+    """摘要链（OpenAI兼容API -> Claude CLI -> 抽取式兜底）。
+    返回 (中文标题或 None, 摘要)。英文标题会要求模型翻译，正文垃圾标签已清洗。"""
     mode = (os.environ.get('SUMMARY_MODE') or CFG.get('summary_mode', 'auto')).lower()
     lang = (os.environ.get('SUMMARY_LANGUAGE') or CFG.get('summary_language', '中文'))
-    excerpt = text[:1600]
-    prompt = ('只输出总结本身（不超过3句%s，说清：新东西是什么/谁做的/多强/意义，'
-              '不要任何前后缀和引号）：\n标题：%s\n正文节选：%s'
-              % (lang, title, excerpt if excerpt else '（无正文，按标题总结）'))
+    excerpt = text[:1800]
+    prompt = ('严格按以下两行格式输出，不要任何其它内容：\n'
+              '中文标题：<把下面的新闻标题翻译成自然%s；若原标题已是%s则原样输出；产品名/型号保留原文>\n'
+              '摘要：<不超过4句%s，说清：新东西是什么/谁做的/多强/意义；忽略正文里的HTML标签或代码垃圾>\n'
+              '标题：%s\n正文节选：%s'
+              % (lang, lang, lang, title, excerpt if excerpt else '（无正文，按标题总结）'))
     s = ''
     if mode in ('auto', 'api', 'openai'):
         s = _summarize_api(prompt)
     if not s and mode in ('auto', 'claude'):
         s = _claude(prompt)
     if s:
-        return s[:320]
+        m_t = re.search(r'中文标题[:：]\s*(.+)', s)
+        m_s = re.search(r'摘要[:：]\s*([\s\S]+)', s)
+        title_cn = m_t.group(1).strip()[:120] if m_t else None
+        summary = m_s.group(1).strip() if m_s else s.strip()
+        if title_cn and title_cn == title:
+            title_cn = None        # 未翻译（本来就是中文）
+        return title_cn, _sent_cut(summary, 500)
     if text:
-        sents = re.split(r'(?<=[。！？!?])', text)[:3]
-        return ''.join(sents)[:170]
-    return ''
+        sents = re.split(r'(?<=[。！？!?])', text)[:4]
+        return None, _sent_cut(''.join(sents), 300)
+    return None, ''
 
 
 # ---------------------------------------------------------------- 主题聚类（同一事件多条报道 -> 一条）
@@ -785,8 +835,9 @@ def main():
     chosen = cluster_items(pending)
     for i, it in enumerate(chosen[:SUMMARY_LIMIT]):
         art = fetch_article(it['link'])
-        it['summary'] = summarize(it['title'], art)
-        print('  摘要 %d/%d %s' % (i + 1, min(len(chosen), SUMMARY_LIMIT), it['title'][:28]))
+        it['title_cn'], it['summary'] = summarize(it['title'], art)
+        print('  摘要 %d/%d %s' % (i + 1, min(len(chosen), SUMMARY_LIMIT),
+                                   (it.get('title_cn') or it['title'])[:40]))
 
     subject = '🤖 AI 雷达：%d 条动态' % len(chosen)
     if len(pending) > len(chosen):
