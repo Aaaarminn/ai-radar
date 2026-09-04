@@ -1,5 +1,5 @@
 [
-  { "name": "OpenAI 官方博客",   "group": "海外官方", "url": "https://openai.com/news/rss.xml", "max_items": 10 },
+  { "name": "OpenAI 官方博客",   "group": "海外官方", "url": "https://openai.com/news/rss.xml", "max_items": 30 },
   { "name": "OpenAI 平台更新",   "group": "海外官方", "url": "{rsshub}/openai/changelog", "enabled": false, "_note": "公共RSSHub实例该路由503；官方博客RSS已覆盖" },
   { "name": "Anthropic 官方新闻", "group": "海外官方", "url": "{rsshub}/anthropic/news" },
   { "name": "DeepMind 博客",     "group": "海外官方", "url": "https://deepmind.google/blog/rss.xml", "max_items": 10 },
@@ -7,6 +7,13 @@
   { "name": "Meta Llama",        "group": "海外官方", "url": "https://github.com/meta-llama/llama/releases.atom", "skip_score": true },
   { "name": "OpenAI 开源权重",   "group": "海外官方", "url": "https://github.com/openai/gpt-oss/releases.atom", "skip_score": true },
   { "name": "DeepSeek GitHub",   "group": "国产官方", "url": "https://github.com/deepseek-ai/DeepSeek-V3/tags.atom", "skip_score": true },
+  {
+    "name": "GitHub Trending",   "group": "社区雷达", "url": "{rsshub}/github/trending/daily/any",
+    "max_items": 6,
+    "keywords": ["llm", "gpt", "claude", "agent", "ai ", "rag", "moe", "inference",
+                 "transformer", "diffusion", "deepseek", "qwen", "glm", "kimi", "openai", "anthropic"],
+    "_note": "每日 GitHub 热榜里的 AI 项目，补足 GitHub 层的日常内容（发版事件仍靠 releases/tags 源）"
+  },
   { "name": "智谱 GLM GitHub",   "group": "国产官方", "url": "https://github.com/zai-org/GLM-5/tags.atom", "enabled": false, "_note": "智谱/Qwen/Kimi 不走 GitHub 发版（实测 0 releases/tags），其动态由社区雷达与中文媒体源覆盖" },
   { "name": "Qwen GitHub",       "group": "国产官方", "url": "https://github.com/QwenLM/Qwen3.8/tags.atom", "enabled": false, "_note": "同上" },
   {
