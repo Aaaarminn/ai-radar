@@ -2,6 +2,7 @@
   "min_score": 4,
   "high_score": 7,
   "high_influence": 8,
+  "influence_floor": 4,
   "batch_min_items": 6,
   "batch_max_age_minutes": 300,
   "max_per_email": 12,
