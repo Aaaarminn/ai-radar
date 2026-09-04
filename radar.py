@@ -67,6 +67,7 @@ CFG = _load_config()
 MIN_SCORE = int(CFG.get('min_score', 4))            # 入选门槛（关键词预筛，控成本）
 HIGH_SCORE = int(CFG.get('high_score', 7))          # 关键词高分兜底（LLM 不可用时）
 HIGH_INFLUENCE = int(CFG.get('high_influence', 8))  # LLM 影响力≥此值：立即发+冷却豁免
+INFLUENCE_FLOOR = int(CFG.get('influence_floor', 4))  # 影响力≤此值：评估后直接不入池
 BATCH_MIN_ITEMS = int(CFG.get('batch_min_items', 6))  # 攒够 N 条发一封
 BATCH_MAX_AGE = int(CFG.get('batch_max_age_minutes', 300))  # 或最早一条已等 N 分钟
 MAX_PER_EMAIL = int(CFG.get('max_per_email', 12))   # 单封邮件（聚类后）最多条数
@@ -777,6 +778,52 @@ def handle_watch(src, state):
              'group': src.get('group', ''), 'dt': None, '_key': key}]
 
 
+def flush_pending(state, force=False, slot=False):
+    """发送窗口：处理待发池（聚类->补摘要->推送）。slot=True 表示整点窗口模式：有料就发。"""
+    pending = state.setdefault('pending', [])
+    if not pending:
+        print('无新消息（待发池空）。')
+        save_state(state)
+        return
+    now_ms = int(time.time() * 1000)
+    oldest_age = (now_ms - min(p['_ts'] for p in pending)) / 60000.0
+    has_high = any((p.get('influence') or 0) >= HIGH_INFLUENCE
+                   or p.get('score', 0) >= HIGH_SCORE for p in pending)
+    since_last = (now_ms - state.get('last_sent', 0)) / 60000.0
+
+    if slot:
+        send = force or has_high or since_last >= SEND_COOLDOWN
+    else:
+        send = (force or has_high or len(pending) >= BATCH_MIN_ITEMS
+                or oldest_age >= BATCH_MAX_AGE)
+        if send and not (force or has_high) and since_last < SEND_COOLDOWN:
+            send = False
+    if not send:
+        print('攒批中：%d 条待发（最早已等 %d 分钟，冷却剩 %d 分钟）'
+              % (len(pending), int(oldest_age), max(0, int(SEND_COOLDOWN - since_last))))
+        save_state(state)
+        return
+
+    chosen = cluster_items(pending)
+    for it in chosen[:SUMMARY_LIMIT]:
+        if not it.get('summary'):        # 老池子条目补评估
+            art = fetch_article(it['link'])
+            it['title_cn'], it['influence'], it['summary'] = summarize(it['title'], art)
+
+    subject = '🤖 AI 雷达：%d 条动态' % len(chosen)
+    if len(pending) > len(chosen):
+        subject += '（聚合自 %d 条报道）' % len(pending)
+    ok = push(subject, chosen)
+    if ok:
+        state['pending'] = []
+        state['last_sent'] = now_ms
+        save_state(state)
+        print('已推送 %d 条（聚合自 %d 条）。' % (len(chosen), len(pending)))
+    else:
+        save_state(state)
+        print('推送失败：待发池保留，下次运行自动重试。')
+
+
 # ---------------------------------------------------------------- 主流程
 def load_state():
     if os.path.exists(STATE_PATH):
@@ -805,6 +852,10 @@ def main():
     ap.add_argument('--init', action='store_true', help='重建基线（记录现状不推送）')
     ap.add_argument('--send-now', action='store_true',
                     help='无视攒批/冷却规则，立即把待发池整封发出')
+    ap.add_argument('--eval-only', action='store_true',
+                    help='只扫描+评估+入池，不推送（配合定时：X:45 评估）')
+    ap.add_argument('--send-only', action='store_true',
+                    help='跳过扫描，只处理待发池（配合定时：整点发送窗口）')
     args = ap.parse_args()
 
     if args.test:
@@ -812,10 +863,16 @@ def main():
         print('TEST:', 'OK' if ok else 'FAILED')
         sys.exit(0)
 
+    state = load_state()
+
+    # ---- 发送窗口模式：跳过扫描，只处理待发池（配合定时任务整点触发） ----
+    if args.send_only:
+        flush_pending(state, force=bool(args.send_now), slot=True)
+        return
+
     with open(SOURCES_PATH, encoding='utf-8') as f:
         sources = json.load(f)
 
-    state = load_state()
     fresh, errors = [], []
     run_seen = set()
 
@@ -896,59 +953,24 @@ def main():
         state['seen'][it['_key']] = it['title'][:80]
         art = fetch_article(it['link'])
         it['title_cn'], it['influence'], it['summary'] = summarize(it['title'], art)
-        print('  评估%d/%d 影响%s %s' % (i + 1, len(fresh),
-                                         it.get('influence') or '-',
+        inf = it.get('influence')
+        print('  评估%d/%d 影响%s %s' % (i + 1, len(fresh), inf or '-',
                                          (it.get('title_cn') or it['title'])[:38]))
+        if inf is not None and inf <= INFLUENCE_FLOOR:
+            continue   # 低影响力（营销/个案/边缘）：已记 seen，不入池不推送
         pending.append({'title': it['title'], 'link': it['link'], 'source': it['source'],
                         'group': it.get('group', ''), '_key': it['_key'],
                         '_ts': now_ms, 'score': it.get('score', 0),
                         '_dt': _dt_ms(it.get('dt')),
                         'title_cn': it.get('title_cn'), 'summary': it.get('summary', ''),
-                        'influence': it.get('influence')})
+                        'influence': inf})
+    save_state(state)
 
-    if not pending:
-        print('无新消息（待发池空）。')
-        save_state(state)
+    if args.eval_only:
+        print('评估完成：%d 条在池，等待发送窗口。' % len(pending))
         return
 
-    # ---- 发送节奏：影响力≥8 立即发（允许大更新连续推送）；普通消息攒批+冷却 ----
-    oldest_age = (now_ms - min(p['_ts'] for p in pending)) / 60000.0
-    has_high = any((p.get('influence') or 0) >= HIGH_INFLUENCE
-                   or p.get('score', 0) >= HIGH_SCORE for p in pending)
-    since_last = (now_ms - state.get('last_sent', 0)) / 60000.0
-
-    send = (args.send_now or has_high
-            or len(pending) >= BATCH_MIN_ITEMS
-            or oldest_age >= BATCH_MAX_AGE)
-    if send and not (args.send_now or has_high) and since_last < SEND_COOLDOWN:
-        send = False   # 冷却期内：普通消息再等等
-
-    if not send:
-        print('攒批中：%d 条待发（最早已等 %d 分钟）。发车条件：满 %d 条 / 满 %d 分钟 / 出现重大新闻'
-              % (len(pending), int(oldest_age), BATCH_MIN_ITEMS, BATCH_MAX_AGE))
-        save_state(state)
-        return
-
-    # ---- 聚类（同一事件多条报道合成一条，影响力最高者领衔）+ 发送 ----
-    chosen = cluster_items(pending)
-    for i, it in enumerate(chosen[:SUMMARY_LIMIT]):
-        if not it.get('summary'):        # 老池子里的条目（评估机制上线前入池）补摘要
-            art = fetch_article(it['link'])
-            it['title_cn'], it['influence'], it['summary'] = summarize(it['title'], art)
-
-    subject = '🤖 AI 雷达：%d 条动态' % len(chosen)
-    if len(pending) > len(chosen):
-        subject += '（聚合自 %d 条报道）' % len(pending)
-    ok = push(subject, chosen)
-    if ok:
-        state['pending'] = []
-        state['last_sent'] = now_ms
-        save_state(state)
-        print('已推送 %d 条（聚合自 %d 条）。' % (len(chosen), len(pending)))
-    else:
-        save_state(state)
-        print('推送失败：待发池保留，下次运行自动重试。')
-        sys.exit(0)  # 不让 Actions 标红
+    flush_pending(state, force=bool(args.send_now), slot=False)
 
 
 if __name__ == '__main__':
