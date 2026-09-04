@@ -516,8 +516,30 @@ class _TextExtract(HTMLParser):
             self.parts.append(data.strip())
 
 
+# 中文科技媒体行文样板（媒体署名/记者名/日期播报等）——污染摘要，统一剥离
+_META_PATTERNS = [
+    r'\d{1,2}月\d{1,2}日消息[，,]?',
+    r'20\d{2}年\d{1,2}月\d{1,2}日[，,]?',
+    r'\d{1,2}月\d{1,2}日[，,]?',
+    r'发自[\u4e00-\u9fff]{2,6}',
+    r'记者[\u4e00-\u9fff]{2,5}(报道)?',
+    r'(量子位|机器之心|新智元|DeepTech|智东西|财联社|科创板日报|雷峰网|TechWeb)\s*[|｜]',
+    r'点击关注[\u4e00-\u9fff]{0,10}',
+    r'关注[\u4e00-\u9fff]{2,8}\s*[:：]\s*[\u4e00-\u9fffA-Za-z0-9]{3,12}',
+    r'本文来自[\u4e00-\u9fff]{2,12}',
+    r'题图来自[\u4e00-\u9fff]{0,12}',
+    r'(综合|据)\s*(报道|消息)',
+]
+
+
+def _strip_meta(s):
+    for p in _META_PATTERNS:
+        s = re.sub(p, ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
 def fetch_article(url, timeout=12):
-    """抓文章正文纯文本（最多 400KB；清除残留 HTML 标签垃圾，失败返回空串）"""
+    """抓文章正文纯文本（最多 400KB；清除残留HTML标签与媒体样板，失败返回空串）"""
     if not url or not url.startswith('http'):
         return ''
     try:
@@ -529,7 +551,7 @@ def fetch_article(url, timeout=12):
         text = ' '.join(p.parts)
         text = re.sub(r'<[^>]{1,300}>', ' ', text)       # 网页里被转义的 <img id=... 等残留
         text = re.sub(r'https?://\S{40,}', ' ', text)     # 正文里的超长裸链接
-        return re.sub(r'\s+', ' ', text).strip()
+        return _strip_meta(text)
     except Exception:  # noqa: BLE001
         return ''
 
@@ -597,9 +619,11 @@ def summarize(title, text):
     lang = (os.environ.get('SUMMARY_LANGUAGE') or CFG.get('summary_language', '中文'))
     excerpt = text[:1800]
     prompt = ('严格按以下两行格式输出，不要任何其它内容：\n'
-              '中文标题：<把下面的新闻标题翻译成自然%s；若原标题已是%s则原样输出；产品名/型号保留原文>\n'
+              '中文标题：<把下面的新闻标题翻译成自然%s；若原标题已是%s则原样输出；'
+              '产品名/型号保留原文；去掉标题里的媒体名/栏目名前缀>\n'
               '摘要：<用精炼的%s总结，1~3句、总共不超过120字；只保留最有信息量的要点'
               '（新东西是什么/谁做的/多强/关键数据），删除铺垫、修饰与重复；'
+              '摘要里禁止出现媒体名、记者名、发布日期、"据报道"等一切来源信息；'
               '忽略正文里的HTML标签或代码垃圾>\n'
               '标题：%s\n正文节选：%s'
               % (lang, lang, lang, title, excerpt if excerpt else '（无正文，按标题总结）'))
@@ -613,6 +637,8 @@ def summarize(title, text):
         m_s = re.search(r'摘要[:：]\s*([\s\S]+)', s)
         title_cn = m_t.group(1).strip()[:120] if m_t else None
         summary = m_s.group(1).strip() if m_s else s.strip()
+        title_cn = _strip_meta(title_cn) if title_cn else None      # 防御性清洗残留样板
+        summary = _strip_meta(summary)
         if title_cn and title_cn == title:
             title_cn = None        # 未翻译（本来就是中文）
         return title_cn, _sent_cut(summary, 220)   # 兜底保险（正常情况下模型输出≤120字，不会触发）
