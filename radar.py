@@ -460,6 +460,7 @@ RELEASE_WORDS = [
     'release', 'launch', 'announc', 'unveil', 'introduc', 'roll out', 'ship',
     'open-source', 'open source', '开源', '发布', '推出', '官宣', '上新', '上架',
     '亮相', '首发', 'weights', '登场', '预告',
+    'overview', 'critical capabilities', 'safeguards', 'system card',  # 官方重磅文档信号
 ]
 NOISE_WORDS = [
     'down', 'outage', '宕机', '故障', '维护', 'ask hn', 'tell hn', 'hiring',
