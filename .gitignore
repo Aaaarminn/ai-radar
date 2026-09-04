@@ -5,3 +5,4 @@ state.json.tmp
 .smtp-setup/
 secrets.local.json
 state.json
+send-now.log
