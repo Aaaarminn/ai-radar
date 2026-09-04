@@ -401,19 +401,21 @@ def build_html(title, items):
                      'letter-spacing:2px;margin:10px 4px 8px;">▎%s</div>' % _esc(g))
         for it in lst:
             parts.append('<div %s>' % css_card)
-            parts.append('<div style="font-size:15px;font-weight:bold;color:#1a232c;'
-                         'line-height:1.5;">%s</div>' % _esc(_disp_title(it)))
+            parts.append('<div style="font-size:17px;font-weight:bold;color:#0f181f;'
+                         'line-height:1.5;margin-bottom:2px;">%s</div>' % _esc(_disp_title(it)))
             orig = _orig_title(it)
             meta = '%s · %s' % (_esc(it.get('source', '')), _tstr(it))
             if orig:
                 meta += ' · 原题：%s' % _esc(orig)
-            parts.append('<div style="font-size:12px;color:#8a95a1;margin:4px 0 8px;">'
+            parts.append('<div style="font-size:12px;color:#8a95a1;margin:4px 0 10px;">'
                          '%s</div>' % meta)
             if it.get('summary'):
+                sents = [x for x in re.split(r'(?<=[。！？!?；])\s*', it['summary']) if x.strip()]
+                lines = ''.join('<div style="margin:0 0 4px 0;">%s</div>' % _esc(s)
+                                for s in sents) or _esc(it['summary'])
                 parts.append('<div style="font-size:13px;color:#37424e;line-height:1.7;'
                              'background:#f8fafc;border-left:3px solid #0288D1;'
-                             'padding:8px 10px;border-radius:0 6px 6px 0;">%s</div>'
-                             % _esc(it['summary']))
+                             'padding:10px 12px;border-radius:0 6px 6px 0;">%s</div>' % lines)
             if it.get('_related_n'):
                 parts.append('<div style="font-size:12px;color:#8a95a1;margin-top:6px;">'
                              '└ 相关报道 %d 条：%s</div>'
