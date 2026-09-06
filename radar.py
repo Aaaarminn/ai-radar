@@ -345,6 +345,19 @@ def _disp_title(it):
     return ('★ ' + t) if it.get('relevant') else t
 
 
+def _disp_meta(it):
+    """元信息行：来源 · 时间 · 影响力分 · 原题（双维度透明展示）"""
+    m = '%s · %s' % (it.get('source', ''), _tstr(it))
+    if it.get('influence'):
+        m += ' · 影响%s' % it['influence']
+    if it.get('relevant'):
+        m += ' · 高相关'
+    orig = _orig_title(it)
+    if orig:
+        m += ' · 原题：%s' % orig
+    return m
+
+
 def _orig_title(it):
     """原题（仅当原标题为外文且已翻译时返回，用于副行展示）"""
     if it.get('title_cn') and it['title_cn'] != it['title'] and not _has_cjk(it['title']):
@@ -365,10 +378,7 @@ def build_markdown(items):
     for g, lst in sorted(_group_items(items).items()):
         lines.append('**▎%s**' % g)
         for it in lst:
-            lines.append('- **%s**（%s %s）' % (_disp_title(it), it.get('source', ''), _tstr(it)))
-            orig = _orig_title(it)
-            if orig:
-                lines.append('  > 原题：%s' % orig)
+            lines.append('- **%s**（%s）' % (_disp_title(it), _disp_meta(it)))
             if it.get('summary'):
                 lines.append('  > %s' % it['summary'])
             if it.get('_related_n'):
@@ -384,9 +394,7 @@ def build_plain(items):
     out = []
     for i, it in enumerate(items, 1):
         out.append('[%02d] %s' % (i, _disp_title(it)))
-        orig = _orig_title(it)
-        meta = '%s · %s' % (it.get('source', ''), _tstr(it))
-        out.append('     %s%s' % (meta, (' · 原题：' + orig) if orig else ''))
+        out.append('     %s' % _disp_meta(it))
         if it.get('summary'):
             out.append('     摘要：%s' % it['summary'])
         if it.get('_related_n'):
@@ -420,12 +428,8 @@ def build_html(title, items):
             parts.append('<div %s>' % css_card)
             parts.append('<div style="font-size:17px;font-weight:bold;color:#0f181f;'
                          'line-height:1.5;margin-bottom:2px;">%s</div>' % _esc(_disp_title(it)))
-            orig = _orig_title(it)
-            meta = '%s · %s' % (_esc(it.get('source', '')), _tstr(it))
-            if orig:
-                meta += ' · 原题：%s' % _esc(orig)
             parts.append('<div style="font-size:12px;color:#8a95a1;margin:4px 0 10px;">'
-                         '%s</div>' % meta)
+                         '%s</div>' % _esc(_disp_meta(it)))
             if it.get('summary'):
                 sents = [x for x in re.split(r'(?<=[。！？!?；])\s*', it['summary']) if x.strip()]
                 lines = ''.join('<div style="margin:0 0 4px 0;">%s</div>' % _esc(s)
@@ -689,8 +693,6 @@ def summarize(title, text):
         if profile:
             m_r = re.search(r'个人相关性[:：]\s*(高|中|低)', s)
             relevant = bool(m_r and m_r.group(1) == '高')
-            if relevant and influence is not None:
-                influence = min(10, influence + 1)   # 高相关加成
         summary = m_s.group(1).strip() if m_s else s.strip()
         title_cn = _strip_meta(title_cn) if title_cn else None
         summary = _strip_meta(summary)
@@ -974,7 +976,9 @@ def main():
                                            '★' if it.get('relevant') else '',
                                            (it.get('title_cn') or it['title'])[:36]))
         if inf is not None and inf <= INFLUENCE_FLOOR:
-            continue   # 低影响力（营销/个案/边缘/体验帖）：已记 seen，不入池不推送
+            # 通用门槛拦截（营销/个案/体验帖）；唯一豁免：高个人相关 且 影响力 5 分
+            if not (it.get('relevant') and inf == 5):
+                continue
         pending.append({'title': it['title'], 'link': it['link'], 'source': it['source'],
                         'group': it.get('group', ''), '_key': it['_key'],
                         '_ts': now_ms, 'score': it.get('score', 0),
