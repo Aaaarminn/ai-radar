@@ -67,12 +67,12 @@ CFG = _load_config()
 MIN_SCORE = int(CFG.get('min_score', 4))            # 入选门槛（关键词预筛，控成本）
 HIGH_SCORE = int(CFG.get('high_score', 7))          # 关键词高分兜底（LLM 不可用时）
 HIGH_INFLUENCE = int(CFG.get('high_influence', 8))  # LLM 影响力≥此值：立即发+冷却豁免
-INFLUENCE_FLOOR = int(CFG.get('influence_floor', 4))  # 影响力≤此值：评估后直接不入池
+INFLUENCE_FLOOR = int(CFG.get('influence_floor', 5))  # 影响力≤此值：评估后直接不入池
+SEND_COOLDOWN = int(CFG.get('send_cooldown_minutes', 600))   # 两封普通邮件最小间隔（10小时≈每天1-2封）
 BATCH_MIN_ITEMS = int(CFG.get('batch_min_items', 6))  # 攒够 N 条发一封
 BATCH_MAX_AGE = int(CFG.get('batch_max_age_minutes', 300))  # 或最早一条已等 N 分钟
 MAX_PER_EMAIL = int(CFG.get('max_per_email', 12))   # 单封邮件（聚类后）最多条数
 SUMMARY_LIMIT = int(CFG.get('summary_limit', 8))    # 单封最多摘要条数
-SEND_COOLDOWN = int(CFG.get('send_cooldown_minutes', 90))   # 两封邮件最小间隔（重大新闻豁免）
 OLD_CUTOFF_DAYS = int(CFG.get('old_cutoff_days', 7))
 
 
@@ -655,7 +655,9 @@ def summarize(title, text):
               '9=国产旗舰大模型发布（如 GLM-5.3、DeepSeek V4 Pro）；'
               '8=重要衍生版本或旗舰级工具（如 GLM-5.3 Flash、DeepSeek V4 Flash、'
               '官方重要框架/工具链）；7=大厂重要产品或功能更新、重要论文；'
-              '5-6=常规更新、第三方适配与集成；4以下=营销活动/客户个案/边缘话题>\n'
+              '5-6=常规更新、第三方适配与集成；'
+              '注意：已发布模型的使用体验/对话印象/跑分对比/教程实测帖一律 3-4 分；'
+              '4以下=营销活动/客户个案/边缘话题>\n'
               '摘要：<用精炼的%s总结，1~3句、总共不超过120字；只保留最有信息量的要点'
               '（新东西是什么/谁做的/多强/关键数据），删除铺垫、修饰与重复；'
               '摘要里禁止出现媒体名、记者名、发布日期、"据报道"等一切来源信息；'
@@ -967,7 +969,13 @@ def main():
     save_state(state)
 
     if args.eval_only:
-        print('评估完成：%d 条在池，等待发送窗口。' % len(pending))
+        has_high = any((p.get('influence') or 0) >= HIGH_INFLUENCE for p in pending)
+        if has_high:
+            print('检测到重大新闻（影响力≥%d）：突破窗口立即推送' % HIGH_INFLUENCE)
+            flush_pending(state, force=False, slot=False)
+        else:
+            print('评估完成：%d 条在池，等待发送窗口。' % len(pending))
+            save_state(state)
         return
 
     flush_pending(state, force=bool(args.send_now), slot=False)
