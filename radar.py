@@ -340,8 +340,9 @@ def _tstr(it):
 
 
 def _disp_title(it):
-    """主标题：中文标题优先"""
-    return it.get('title_cn') or it['title']
+    """主标题：中文标题优先；高相关时加标记"""
+    t = it.get('title_cn') or it['title']
+    return ('★ ' + t) if it.get('relevant') else t
 
 
 def _orig_title(it):
@@ -641,29 +642,35 @@ def _sent_cut(s, limit):
 
 
 def summarize(title, text):
-    """理解式评估：通读正文后输出 (中文标题|None, 影响力1-10|None, 摘要)。
-    影响力标准：9-10 里程碑级（新旗舰模型/重磅开源/行业格局变化）；7-8 重要（大厂重要
-    版本或产品）；5-6 一般常规更新；4以下 边缘/营销/个案。抽取式兜底时影响力为 None。"""
+    """理解式评估：通读正文后输出 (中文标题|None, 影响力1-10|None, 摘要, 高相关|False)。
+    配置了 user_profile / USER_PROFILE 时追加"个人相关性"判断：高相关 +1 分（封顶10）。"""
     mode = (os.environ.get('SUMMARY_MODE') or CFG.get('summary_mode', 'auto')).lower()
     lang = (os.environ.get('SUMMARY_LANGUAGE') or CFG.get('summary_language', '中文'))
+    profile = _sec('USER_PROFILE') or CFG.get('user_profile', '')
     excerpt = text[:1800]
-    prompt = ('严格按以下三行格式输出，不要任何其它内容：\n'
-              '中文标题：<把下面的新闻标题翻译成自然%s；若原标题已是%s则原样输出；'
-              '产品名/型号保留原文；去掉标题里的媒体名/栏目名前缀>\n'
-              '影响力：<1-10整数。标尺：10=全球顶级实验室旗舰模型发布'
-              '（如 OpenAI GPT-6 Astra、Anthropic Claude 5.1 Fable、Gemini 旗舰）；'
-              '9=国产旗舰大模型发布（如 GLM-5.3、DeepSeek V4 Pro）；'
-              '8=重要衍生版本或旗舰级工具（如 GLM-5.3 Flash、DeepSeek V4 Flash、'
-              '官方重要框架/工具链）；7=大厂重要产品或功能更新、重要论文；'
-              '5-6=常规更新、第三方适配与集成；'
-              '注意：已发布模型的使用体验/对话印象/跑分对比/教程实测帖一律 3-4 分；'
-              '4以下=营销活动/客户个案/边缘话题>\n'
-              '摘要：<用精炼的%s总结，1~3句、总共不超过120字；只保留最有信息量的要点'
-              '（新东西是什么/谁做的/多强/关键数据），删除铺垫、修饰与重复；'
-              '摘要里禁止出现媒体名、记者名、发布日期、"据报道"等一切来源信息；'
-              '忽略正文里的HTML标签或代码垃圾>\n'
-              '标题：%s\n正文节选：%s'
-              % (lang, lang, lang, title, excerpt if excerpt else '（无正文，按标题评估）'))
+    fmt_lines = [
+        '严格按以下格式输出，不要任何其它内容：',
+        '中文标题：<把下面的新闻标题翻译成自然%s；若原标题已是%s则原样输出；'
+        '产品名/型号保留原文；去掉标题里的媒体名/栏目名前缀>' % (lang, lang),
+        '影响力：<1-10整数。标尺：10=全球顶级实验室旗舰模型发布'
+        '（如 OpenAI GPT-6 Astra、Anthropic Claude 5.1 Fable、Gemini 旗舰）；'
+        '9=国产旗舰大模型发布（如 GLM-5.3、DeepSeek V4 Pro）；'
+        '8=重要衍生版本或旗舰级工具（如 GLM-5.3 Flash、DeepSeek V4 Flash、'
+        '官方重要框架/工具链）；7=大厂重要产品或功能更新、重要论文；'
+        '5-6=常规更新、第三方适配与集成；'
+        '注意：已发布模型的使用体验/对话印象/跑分对比/教程实测帖一律 3-4 分；'
+        '4以下=营销活动/客户个案/边缘话题>',
+    ]
+    if profile:
+        fmt_lines.append('个人相关性：<高/中/低。用户画像：%s。'
+                         '判断该内容对画像用户的匹配度>' % profile)
+    fmt_lines.append('摘要：<用精炼的%s总结，1~3句、总共不超过120字；只保留最有信息量的要点'
+                     '（新东西是什么/谁做的/多强/关键数据），删除铺垫、修饰与重复；'
+                     '摘要里禁止出现媒体名、记者名、发布日期、"据报道"等一切来源信息；'
+                     '忽略正文里的HTML标签或代码垃圾>' % lang)
+    fmt_lines.append('标题：%s' % title)
+    fmt_lines.append('正文节选：%s' % (excerpt if excerpt else '（无正文，按标题评估）'))
+    prompt = '\n'.join(fmt_lines)
     s = ''
     if mode in ('auto', 'api', 'openai'):
         s = _summarize_api(prompt)
@@ -675,9 +682,15 @@ def summarize(title, text):
         m_s = re.search(r'摘要[:：]\s*([\s\S]+)', s)
         title_cn = None
         if m_t:
-            t = re.split(r'\s*(?:影响力|摘要)[:：]', m_t.group(1))[0].strip()
+            t = re.split(r'\s*(?:影响力|个人相关性|摘要)[:：]', m_t.group(1))[0].strip()
             title_cn = t[:120] or None
         influence = min(10, max(1, int(m_i.group(1)))) if m_i else None
+        relevant = False
+        if profile:
+            m_r = re.search(r'个人相关性[:：]\s*(高|中|低)', s)
+            relevant = bool(m_r and m_r.group(1) == '高')
+            if relevant and influence is not None:
+                influence = min(10, influence + 1)   # 高相关加成
         summary = m_s.group(1).strip() if m_s else s.strip()
         title_cn = _strip_meta(title_cn) if title_cn else None
         summary = _strip_meta(summary)
@@ -700,11 +713,11 @@ def summarize(title, text):
                              '（产品名/型号保留原文）：' + title)
             if t2 and _has_cjk(t2):
                 title_cn = _strip_meta(t2.splitlines()[0])[:120]
-        return title_cn, influence, _sent_cut(summary, 220)
+        return title_cn, influence, _sent_cut(summary, 220), relevant
     if text:
         sents = re.split(r'(?<=[。！？!?])', text)[:3]
-        return None, None, _sent_cut(''.join(sents), 200)
-    return None, None, ''
+        return None, None, _sent_cut(''.join(sents), 200), False
+    return None, None, '', False
 
 
 # ---------------------------------------------------------------- 主题聚类（同一事件多条报道 -> 一条）
@@ -810,7 +823,8 @@ def flush_pending(state, force=False, slot=False):
     for it in chosen[:SUMMARY_LIMIT]:
         if not it.get('summary'):        # 老池子条目补评估
             art = fetch_article(it['link'])
-            it['title_cn'], it['influence'], it['summary'] = summarize(it['title'], art)
+            (it['title_cn'], it['influence'],
+             it['summary'], it['relevant']) = summarize(it['title'], art)
 
     subject = '🤖 AI 雷达：%d 条动态' % len(chosen)
     if len(pending) > len(chosen):
@@ -954,18 +968,19 @@ def main():
     for i, it in enumerate(fresh):
         state['seen'][it['_key']] = it['title'][:80]
         art = fetch_article(it['link'])
-        it['title_cn'], it['influence'], it['summary'] = summarize(it['title'], art)
+        it['title_cn'], it['influence'], it['summary'], it['relevant'] = summarize(it['title'], art)
         inf = it.get('influence')
-        print('  评估%d/%d 影响%s %s' % (i + 1, len(fresh), inf or '-',
-                                         (it.get('title_cn') or it['title'])[:38]))
+        print('  评估%d/%d 影响%s%s %s' % (i + 1, len(fresh), inf or '-',
+                                           '★' if it.get('relevant') else '',
+                                           (it.get('title_cn') or it['title'])[:36]))
         if inf is not None and inf <= INFLUENCE_FLOOR:
-            continue   # 低影响力（营销/个案/边缘）：已记 seen，不入池不推送
+            continue   # 低影响力（营销/个案/边缘/体验帖）：已记 seen，不入池不推送
         pending.append({'title': it['title'], 'link': it['link'], 'source': it['source'],
                         'group': it.get('group', ''), '_key': it['_key'],
                         '_ts': now_ms, 'score': it.get('score', 0),
                         '_dt': _dt_ms(it.get('dt')),
                         'title_cn': it.get('title_cn'), 'summary': it.get('summary', ''),
-                        'influence': inf})
+                        'influence': inf, 'relevant': it.get('relevant', False)})
     save_state(state)
 
     if args.eval_only:
