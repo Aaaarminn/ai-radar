@@ -6,3 +6,5 @@ state.json.tmp
 secrets.local.json
 state.json
 send-now.log
+sent_log.json
+digest_*.md
