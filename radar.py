@@ -5,8 +5,9 @@ AI-Radar —— AI 大厂研发动态雷达（零依赖，仅 Python 标准库�
 
 数据源：官方博客（经 RSSHub 桥接，多实例容错）+ GitHub Releases Atom
         + Hacker News / Reddit 社区雷达 + 中文科技媒体 RSS
-推送：PushPlus -> 微信
-运行：GitHub Actions 每 30 分钟（见 .github/workflows/radar.yml），或本地 python radar.py
+推送：邮件(HTML卡片)/企微/Server酱/WxPusher/PushPlus 多通道
+运行：本地两阶段定时（Eval 每2小时:45 评估 / Send 每2小时整点发送，见 install-task.ps1），
+      或 GitHub Actions 云端（.github/workflows/radar.yml），或单次 python radar.py
 
 用法：
   python radar.py            # 常规扫描：抓新 -> 推微信 -> 写回 state.json
@@ -15,6 +16,7 @@ AI-Radar —— AI 大厂研发动态雷达（零依赖，仅 Python 标准库�
   python radar.py --init     # 重建基线：记录当前全部条目但不推送
 """
 import argparse
+import concurrent.futures
 import datetime
 import email.utils
 import hashlib
@@ -111,14 +113,22 @@ def fetch(url, timeout=25):
 def resolve(url):
     """{rsshub} 占位符 -> 依次尝试实例，返回第一个成功的响应"""
     if '{rsshub}' not in url:
-        return fetch(url)
+        return fetch(url, timeout=12)
     last = None
     for inst in RSSHUB_INSTANCES:
         try:
-            return fetch(url.replace('{rsshub}', inst))
+            return fetch(url.replace('{rsshub}', inst), timeout=10)
         except Exception as e:  # noqa: BLE001
             last = e
     raise last if last else RuntimeError('no rsshub instance')
+
+
+def _resolve_safe(src):
+    """并行预抓取用：返回 (数据, None) 或 (None, 异常)，异常留给主循环归类"""
+    try:
+        return resolve(src['url']), None
+    except Exception as e:  # noqa: BLE001
+        return None, e
 
 
 def _tag(el):
@@ -185,6 +195,9 @@ def parse_date(s):
 
 def _utcnow():
     return datetime.datetime.now(datetime.timezone.utc)
+
+
+_CN_TZ = datetime.timezone(datetime.timedelta(hours=8))  # 展示时区固定 +8（云端 Actions 为 UTC）
 
 
 def is_too_old(dt):
@@ -289,20 +302,25 @@ def push(title, items):
     配置来源：环境变量 或 secrets.local.json（适配计划任务等无环境变量场景）"""
     try:
         if _sec('WECOM_WEBHOOK'):
+            print('[push] 通道: wecom')
             c = items if isinstance(items, str) else build_markdown(items)
             return push_wecom(_sec('WECOM_WEBHOOK'), title, c)
         if _sec('SERVERCHAN_KEY'):
+            print('[push] 通道: serverchan')
             c = items if isinstance(items, str) else build_markdown(items)
             return push_serverchan(_sec('SERVERCHAN_KEY'), title, c)
         smtp = {'host': _sec('SMTP_HOST'), 'port': _sec('SMTP_PORT') or '465',
                 'user': _sec('SMTP_USER'), 'pass': _sec('SMTP_PASS'),
                 'to': _sec('SMTP_TO')}
         if smtp['host'] and smtp['user'] and smtp['pass'] and smtp['to']:
+            print('[push] 通道: smtp')
             return push_smtp(smtp, title, items)
         if _sec('WXPUSHER_TOKEN') and _sec('WXPUSHER_UID'):
+            print('[push] 通道: wxpusher')
             c = items if isinstance(items, str) else build_markdown(items)
             return push_wxpusher(_sec('WXPUSHER_TOKEN'), _sec('WXPUSHER_UID'), title, c)
         if _sec('PUSHPLUS_TOKEN'):
+            print('[push] 通道: pushplus')
             c = items if isinstance(items, str) else build_markdown(items)
             return push_pushplus(_sec('PUSHPLUS_TOKEN'), title, c)
         print('[push] 未配置任何通道（WECOM_WEBHOOK / SERVERCHAN_KEY / SMTP_* / WXPUSHER_* / PUSHPLUS_TOKEN）')
@@ -333,9 +351,9 @@ def _tstr(it):
     if dt is not None:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=datetime.timezone.utc)
-        return dt.astimezone().strftime('%m-%d %H:%M')
+        return dt.astimezone(_CN_TZ).strftime('%m-%d %H:%M')
     if it.get('_ts'):
-        return time.strftime('%m-%d %H:%M', time.localtime(it['_ts'] / 1000))
+        return datetime.datetime.fromtimestamp(it['_ts'] / 1000, _CN_TZ).strftime('%m-%d %H:%M')
     return ''
 
 
@@ -418,7 +436,7 @@ def build_html(title, items):
         '<div style="font-size:18px;font-weight:bold;">🤖 %s</div>'
         '<div style="font-size:12px;opacity:.85;margin-top:4px;">%s · 共 %d 条'
         '</div></div>' % (_esc(title),
-                          time.strftime('%Y-%m-%d %H:%M'), len(items)),
+                          datetime.datetime.now(_CN_TZ).strftime('%Y-%m-%d %H:%M'), len(items)),
         '<div style="background:#f4f7fa;border-radius:0 0 10px 10px;padding:14px 12px;">',
     ]
     for g, lst in sorted(_group_items(items).items()):
@@ -476,7 +494,6 @@ NOISE_WORDS = [
 ]
 VERSION_RE = re.compile(r'\bv?\d+(?:\.\d+)?\b')
 SCORED_GROUPS = ('社区雷达', '中文媒体', '海外官方', '国产官方')  # 需过评分的组
-MIN_SCORE = 4
 
 
 def score_title(title):
@@ -568,9 +585,8 @@ def fetch_article(url, timeout=12):
     if not url or not url.startswith('http'):
         return ''
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': UA})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            html = r.read(400_000).decode('utf-8', errors='ignore')
+        # 走 fetch()：享受代理回退与 certifi SSL 上下文（海外正文抓取成功率↑）
+        html = fetch(url, timeout=timeout)[:400_000].decode('utf-8', errors='ignore')
         p = _TextExtract()
         p.feed(html)
         text = ' '.join(p.parts)
@@ -894,6 +910,14 @@ def main():
     fresh, errors = [], []
     run_seen = set()
 
+    # ---- 并行预抓取 RSS/Atom 源（:45 评估距整点发送窗只有 15 分钟，串行最坏会超窗）----
+    rss_srcs = [s for s in sources if s.get('enabled', True) and s.get('type') != 'watch']
+    fetched = {}
+    if rss_srcs:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            for src, res in zip(rss_srcs, ex.map(_resolve_safe, rss_srcs)):
+                fetched[id(src)] = res
+
     for src in sources:
         if not src.get('enabled', True):
             continue
@@ -908,8 +932,11 @@ def main():
             except Exception as e:  # noqa: BLE001
                 errors.append('%s: %s' % (src['name'], str(e)[:120]))
             continue
+        data, ferr = fetched[id(src)]
+        if ferr is not None:
+            errors.append('%s: %s' % (src['name'], str(ferr)[:120]))
+            continue
         try:
-            data = resolve(src['url'])
             items = parse_feed(data)
         except Exception as e:  # noqa: BLE001
             errors.append('%s: %s' % (src['name'], str(e)[:120]))
@@ -956,6 +983,8 @@ def main():
 
     # ---- 首跑 / 显式 init：建基线，不推送 ----
     if args.init or state.get('first_run', False):
+        if args.init and state.get('pending'):
+            print('注意：重建基线将清空待发池，丢弃 %d 条已入池未发条目。' % len(state['pending']))
         for it in fresh:
             state['seen'][it['_key']] = it['title'][:80]
         state['first_run'] = False
