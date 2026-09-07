@@ -3,7 +3,7 @@ name: ai-radar
 on:
   workflow_dispatch: {}       # 手动触发（云端模式请打开下面两行 cron；注意与本机模式二选一，否则双倍发信）
   # schedule:
-  #   - cron: '0,30 * * * *'
+  #   - cron: '0 */2 * * *'   # 每 2 小时整轮（扫描+评估+发送），与本地两阶段节奏对齐
 
 permissions:
   contents: write
