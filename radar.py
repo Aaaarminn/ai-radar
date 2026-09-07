@@ -268,11 +268,12 @@ def push_wxpusher(token, uid, title, content):
 
 
 def push_smtp(cfg, title, items):
-    """邮件通道：HTML 卡片排版 + 纯文本降级（免费不限量）"""
+    """邮件通道：HTML 卡片排版 + 纯文本降级；smtp_to 支持逗号分隔多收件人"""
     import smtplib
     from email.header import Header
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
+    recipients = [r.strip() for r in str(cfg['to']).split(',') if r.strip()]
     if isinstance(items, str):
         html, plain = '<pre style="font-family:sans-serif;">%s</pre>' % _esc(items), items
     else:
@@ -280,13 +281,13 @@ def push_smtp(cfg, title, items):
     msg = MIMEMultipart('alternative')
     msg['Subject'] = Header(title, 'utf-8')
     msg['From'] = cfg['user']
-    msg['To'] = cfg['to']
+    msg['To'] = ', '.join(recipients)
     msg.attach(MIMEText(plain, 'plain', 'utf-8'))
     msg.attach(MIMEText(html, 'html', 'utf-8'))
     cls = smtplib.SMTP_SSL if str(cfg.get('port', '465')) == '465' else smtplib.SMTP
     with cls(cfg['host'], int(cfg.get('port', 465)), timeout=25) as s:
         s.login(cfg['user'], cfg['pass'])
-        s.sendmail(cfg['user'], [cfg['to']], msg.as_string())
+        s.sendmail(cfg['user'], recipients, msg.as_string())
     return True
 
 
