@@ -50,6 +50,19 @@
   { "name": "MiniMax 新闻",      "group": "国产官方", "url": "{rsshub}/minimax/news", "enabled": false, "_note": "无原生RSS且公共路由失效；由HN/量子位覆盖" },
   { "name": "月之暗面新闻",      "group": "国产官方", "url": "{rsshub}/moonshot/news", "enabled": false, "_note": "无原生RSS且公共路由失效；由HN/量子位覆盖" },
   {
+    "name": "智谱 HF 模型库",    "group": "国产官方", "url": "https://huggingface.co/zai-org",
+    "type": "watch",
+    "_note": "监视 HF org 页模型名，GLM 新权重上架即报（官方一手渠道）；首次运行只建基线"
+  },
+  {
+    "name": "Qwen HF 模型库",      "group": "国产官方", "url": "https://huggingface.co/Qwen",
+    "type": "watch", "_note": "同上，Qwen 系新模型上架即报"
+  },
+  {
+    "name": "月之暗面 HF 模型库",  "group": "国产官方", "url": "https://huggingface.co/moonshotai",
+    "type": "watch", "_note": "同上，Kimi 系新模型上架即报"
+  },
+  {
     "name": "LMArena 榜单",      "group": "社区雷达", "url": "https://lmarena.ai/leaderboard",
     "type": "watch", "_note": "监视榜单页模型名变化，新模型上榜（含匿名被识破）即播报"
   },

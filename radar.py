@@ -38,6 +38,7 @@ except Exception:  # noqa: BLE001
 BASE = os.path.dirname(os.path.abspath(__file__))
 SOURCES_PATH = os.path.join(BASE, 'sources.json')
 STATE_PATH = os.path.join(BASE, 'state.json')
+SENT_LOG_PATH = os.path.join(BASE, 'sent_log.json')   # 发送历史存档（--export-md / --profile-suggest 数据源）
 
 # RSSHub 公共实例（{rsshub} 占位符按序尝试）
 RSSHUB_INSTANCES = [
@@ -849,6 +850,7 @@ def flush_pending(state, force=False, slot=False):
         subject += '（聚合自 %d 条报道）' % len(pending)
     ok = push(subject, chosen)
     if ok:
+        _append_sent(chosen, now_ms)
         state['pending'] = []
         state['last_sent'] = now_ms
         save_state(state)
@@ -856,6 +858,104 @@ def flush_pending(state, force=False, slot=False):
     else:
         save_state(state)
         print('推送失败：待发池保留，下次运行自动重试。')
+
+
+def _append_sent(items, now_ms):
+    """发送历史追加存档（--export-md / --profile-suggest 数据源）；保留最近 200 封"""
+    log = []
+    try:
+        if os.path.exists(SENT_LOG_PATH):
+            with open(SENT_LOG_PATH, encoding='utf-8') as f:
+                log = json.load(f)
+    except Exception:  # noqa: BLE001
+        log = []
+    log.append({'ts': now_ms, 'items': [
+        {'t': it.get('title_cn') or it['title'], 'g': it.get('group', ''),
+         'inf': it.get('influence'), 'rel': bool(it.get('relevant')),
+         's': (it.get('summary') or '')[:140], 'l': it.get('link', '')}
+        for it in items]})
+    log = log[-200:]
+    tmp = SENT_LOG_PATH + '.tmp'
+    with open(tmp, 'w', encoding='utf8') as f:
+        json.dump(log, f, ensure_ascii=False)
+    os.replace(tmp, SENT_LOG_PATH)
+
+
+def _export_md(days):
+    """最近 N 天发送历史 -> markdown 精选（影响力降序，高相关置顶加★）；打印并存 digest_*.md"""
+    if not os.path.exists(SENT_LOG_PATH):
+        print('尚无发送历史（sent_log.json 不存在），跑出第一封邮件后可用。')
+        return
+    with open(SENT_LOG_PATH, encoding='utf-8') as f:
+        log = json.load(f)
+    cutoff = time.time() * 1000 - days * 86400000
+    items, seen = [], set()
+    for mail in log:
+        if mail.get('ts', 0) < cutoff:
+            continue
+        for it in mail['items']:
+            k = it.get('l') or it.get('t')
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            items.append(it)
+    if not items:
+        print('近 %d 天无发送记录。' % days)
+        return
+    items.sort(key=lambda x: (1 if x.get('rel') else 0, x.get('inf') or 0), reverse=True)
+    lines = ['# AI 动态精选（近 %d 天，共 %d 条）' % (days, len(items)), '']
+    for it in items:
+        lines.append('- **[%s%s] %s**（%s）' % (it.get('inf') or '-', '★' if it.get('rel') else '',
+                                                it['t'], it.get('g') or ''))
+        if it.get('s'):
+            lines.append('  - %s' % it['s'])
+        if it.get('l'):
+            lines.append('  - [原文](%s)' % it['l'])
+    out = '\n'.join(lines)
+    fn = os.path.join(BASE, 'digest_%s.md' % time.strftime('%Y%m%d'))
+    with open(fn, 'w', encoding='utf8') as f:
+        f.write(out + '\n')
+    print(out)
+    print('\n（已存 %s）' % fn)
+
+
+def _profile_suggest():
+    """读近 30 天 ★ 高相关标题，请 LLM 起草更新版个人画像（打印草稿，确认后自行贴进 secrets.local.json）"""
+    profile = _sec('USER_PROFILE') or CFG.get('user_profile', '')
+    if not profile:
+        print('当前未配置 USER_PROFILE（secrets.local.json 或 config.json），先配一版再来迭代。')
+        return
+    if not os.path.exists(SENT_LOG_PATH):
+        print('尚无发送历史，跑一段时间再来。')
+        return
+    with open(SENT_LOG_PATH, encoding='utf-8') as f:
+        log = json.load(f)
+    cutoff = time.time() * 1000 - 30 * 86400000
+    rel, hot = [], []
+    for mail in log:
+        if mail.get('ts', 0) < cutoff:
+            continue
+        for it in mail['items']:
+            if it.get('rel'):
+                rel.append(it['t'])
+            elif (it.get('inf') or 0) >= 8:
+                hot.append(it['t'])
+    if len(rel) < 5:
+        print('近 30 天仅 %d 条高相关记录，样本太少（需≥5），建议再跑两周。' % len(rel))
+        return
+    prompt = ('下面是我的个人画像与最近被标记为高相关的 AI 资讯标题。请据此更新画像：'
+              '保留仍成立的部分，合并新出现的关注点，删掉过时的。只输出更新后的画像本身'
+              '（3~5 句，不解释、不加前后缀），要能用于判断一条 AI 资讯与我的相关度。\n\n'
+              '当前画像：%s\n\n近 30 天高相关标题（%d 条）：\n%s\n\n'
+              '参考（高影响力但未标高相关）：%s'
+              % (profile, len(rel), '\n'.join('- ' + t for t in rel[:60]),
+                 '；'.join(hot[:15]) or '无'))
+    draft = _summarize_api(prompt) or _claude(prompt)
+    if not draft:
+        print('LLM 不可用，稍后再试。')
+        return
+    print('---- 建议新画像（确认后替换 secrets.local.json 的 USER_PROFILE）----')
+    print(draft.strip())
 
 
 # ---------------------------------------------------------------- 主流程
@@ -890,6 +990,10 @@ def main():
                     help='只扫描+评估+入池，不推送（配合定时：X:45 评估）')
     ap.add_argument('--send-only', action='store_true',
                     help='跳过扫描，只处理待发池（配合定时：整点发送窗口）')
+    ap.add_argument('--export-md', nargs='?', const='7', default=None, metavar='N',
+                    help='导出最近 N 天（默认 7）发送历史为 markdown（周报/分享素材）')
+    ap.add_argument('--profile-suggest', action='store_true',
+                    help='基于近 30 天 ★ 高相关记录起草更新版个人画像')
     args = ap.parse_args()
 
     if args.test:
@@ -897,7 +1001,15 @@ def main():
         print('TEST:', 'OK' if ok else 'FAILED')
         sys.exit(0)
 
+    if args.export_md is not None:
+        _export_md(int(args.export_md))
+        return
+    if args.profile_suggest:
+        _profile_suggest()
+        return
+
     state = load_state()
+    state.setdefault('last_ok', int(time.time() * 1000))   # 哑火告警的基点
 
     # ---- 发送窗口模式：跳过扫描，只处理待发池（配合定时任务整点触发） ----
     if args.send_only:
@@ -980,6 +1092,18 @@ def main():
         for it in fresh[:40]:
             print('  [%s] %s' % (it['group'], it['title']))
         return
+
+    # ---- 哑火自检：全部源失败且距上次健康超 24h -> 告警邮件（每天最多 1 封，防静默失败）----
+    attempted = sum(1 for s in sources if s.get('enabled', True))
+    _now = int(time.time() * 1000)
+    if errors and len(errors) >= attempted:
+        if (_now - state.get('last_ok', _now) >= 86400000
+                and _now - state.get('last_dead_alert', 0) >= 86400000):
+            push('⚠️ AI-Radar 哑火告警',
+                 '全部 %d 个源抓取失败，距上次健康运行已超 24 小时；请检查网络/代理/源站可用性。' % attempted)
+            state['last_dead_alert'] = _now
+    else:
+        state['last_ok'] = _now
 
     # ---- 首跑 / 显式 init：建基线，不推送 ----
     if args.init or state.get('first_run', False):

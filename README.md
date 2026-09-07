@@ -84,7 +84,7 @@ powershell -ExecutionPolicy Bypass -File install-task.ps1   # 注册两阶段任
 
 消息源在 `sources.json`：官方 RSS 直连 + GitHub tags + HN 关键词热帖 + LMArena 榜单
 变动监视（新模型上榜即报，含匿名款被识破）+ HF 每日论文 + arXiv 重大论文（HN≥150 赞）
-+ 量子位。加源/关源/改关键词改这个文件即可。
++ 国产官方 HF 模型库监视（GLM/Qwen/Kimi 新权重上架即报）+ 量子位。加源/关源/改关键词改这个文件即可。
 
 ## 命令
 
@@ -96,6 +96,8 @@ python radar.py --eval-only   # 只扫描+评估+入池（定时 :45 调用）
 python radar.py --send-only   # 只处理待发池（定时整点发送窗口）
 python radar.py --test       # 推送通道测试
 python radar.py --init       # 重建基线（换源后防止旧消息涌入）
+python radar.py --export-md  # 导出最近7天发送历史为markdown素材（可跟天数：--export-md 14）
+python radar.py --profile-suggest  # 用近30天★高相关记录起草新版个人画像
 ```
 
 ## 致谢与许可
