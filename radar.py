@@ -461,13 +461,19 @@ def build_html(title, items):
                 parts.append('<div style="font-size:13px;color:#37424e;line-height:1.7;'
                              'background:#f8fafc;border-left:3px solid #0288D1;'
                              'padding:10px 12px;border-radius:0 6px 6px 0;">%s</div>' % lines)
-            # 详细编译：完整中文翻译/改写（替代打开原文）
+            # 详细编译：结构化分析报告（替代打开原文）
             if it.get('full_text'):
                 for para in it['full_text'].split('\n'):
                     p = para.strip()
                     if len(p) > 2:
-                        parts.append('<div style="font-size:13px;color:#2c3640;line-height:1.8;'
-                                     'margin:6px 0 0 0;">%s</div>' % _esc(p))
+                        if p.startswith('【'):
+                            parts.append('<div style="font-size:13px;font-weight:bold;'
+                                         'color:#01579B;margin:12px 0 4px 0;'
+                                         'padding-bottom:2px;border-bottom:1px solid #e0e8ef;">'
+                                         '%s</div>' % _esc(p))
+                        else:
+                            parts.append('<div style="font-size:13px;color:#2c3640;line-height:1.8;'
+                                         'margin:4px 0 0 0;">%s</div>' % _esc(p))
             if it.get('_related_n'):
                 parts.append('<div style="font-size:12px;color:#8a95a1;margin-top:6px;">'
                              '└ 相关报道 %d 条：%s</div>'
@@ -700,9 +706,20 @@ def summarize(title, text):
         fmt_lines.append('个人相关性：<高/中/低。用户画像：%s。'
                          '判断该内容对画像用户的匹配度>' % profile)
     fmt_lines.append('摘要：<用精炼的%s总结，1~3句、总共不超过120字>' % lang)
-    fmt_lines.append('详细编译：<把正文完整翻译/编译成流畅%s，保留所有关键信息'
-                     '（技术细节、数据、背景、意义），删掉广告和废话；'
-                     '长度500~1500字，用自然段落分隔；禁止出现媒体名/记者名/日期>' % lang)
+    fmt_lines.append(
+        '详细编译：<像技术顾问一样为用户整理这条内容，输出结构化%s报告，按内容类型选格式：\n'
+        '【新闻/发布公告】→ 「核心内容」3~5条关键事实（数据/参数/变化点）+'
+        '「行业影响」2~3句这意味着什么、对格局的影响 +'
+        '「对你的意义」结合用户画像1~2句 actionable 建议\n'
+        '【工具/项目/开源仓库】→ 「这是什么」1~2句功能定位 +'
+        '「为什么对你有用」结合画像2~3条具体场景 +'
+        '「怎么上手」安装/入门路径（pip/npm/git clone/配置要点）+'
+        '「别人怎么用」社区典型用法/集成案例 +'
+        '「注意事项」坑/限制/替代品\n'
+        '【论文/研究】→ 「核心发现」2~3条关键结论 +'
+        '「实际意义」工程落地的可能路径\n'
+        '每部分用【标签】开头，段落清晰；总共800~2000字；'
+        '禁止出现媒体名/记者名/日期>' % lang)
     fmt_lines.append('标题：%s' % title)
     fmt_lines.append('正文节选：%s' % (excerpt if excerpt else '（无正文，按标题评估）'))
     prompt = '\n'.join(fmt_lines)
