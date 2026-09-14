@@ -93,5 +93,9 @@
     "max_items": 5,
     "keywords": ["arxiv"],
     "_note": "arXiv 论文上了 HN 热帖才播报（>=150赞）：重大论文的自然过滤器"
-  }
-]
+  },
+  { "name": "smol.ai AI News",   "group": "海外快讯", "url": "https://news.smol.ai/rss.xml", "max_items": 5,
+    "_note": "每日聚合 X/Twitter 上大厂与开发者首发动态（X 无开放RSS的最佳替代）" },
+  { "name": "The Rundown AI",    "group": "海外快讯", "url": "https://www.therundown.ai/feed", "max_items": 3 },
+  { "name": "AlphaSignal",       "group": "海外快讯", "url": "https://alphasignal.ai/feed.xml", "max_items": 5 },
+  { "name": "Latent Space",      "group": "海外快讯", "url": "https://www.latent.space/feed", "max_items": 3 },
