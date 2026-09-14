@@ -1,106 +1,155 @@
-# AI-Radar 🤖 AI 大厂动态雷达
+# AI-Radar 🤖 AI 动态雷达
 
-第一手盯住 AI 公司的发布渠道，**粗筛 → LLM 双维度评估 → 主题聚类 → 攒批发送**，
-把信息噪音压缩成每天 1~2 封高密度邮件。
+**39 个信息源 → 6 层筛选漏斗 → LLM 智能评估 → 结构化中文编译 → 定时推送邮件**
+
+不是 RSS 阅读器，是一个**理解信息价值的自动化情报系统**：它读完全文后判断重要性、
+翻译成中文、写结构化分析报告，然后按你定的节奏推送到邮箱 —— **打开邮件就是阅读终点，
+不需要开代理、不需要点外链**。
 
 ```
-海外官方(OpenAI/DeepMind/Google/Anthropic RSS) ─┐
-国产官方(DeepSeek GitHub tags)                 ├─> 评分过滤(噪音强扣) ─> 主题聚类(10条报道=1条)
-社区雷达(HN热帖/r/LocalLLaMA/LMArena榜单监视) ┤                                ├─> LLM三句话摘要 ─> 攒批发邮件
-论文雷达(HF每日论文/arXiv重大论文)             │                                │    (重大新闻立即发)
-中文媒体(量子位)                               ─┘                                └─> 抽取式兜底(零配置可用)
+海外官方(OpenAI/DeepMind/Google/Microsoft/NVIDIA/HF) ─┐
+海外媒体(TechCrunch/MIT TR/Ars/Wired)               ├─→ 关键词预筛 ─→ 跨源去重(同主题留1条)
+海外快讯(smol.ai/AlphaSignal/Latent Space)          │                    ↓
+社区雷达(HN双档/LMArena/GitHub Trending)            ├─→ LLM影响力评估(1-10分)
+论文雷达(HF每日论文/arXiv重大)                       │                    ↓
+国产官方(DeepSeek/智谱/Qwen/Kimi HF监视)             ┤              门槛拦截(≤5分丢弃)
+中文媒体(量子位/降权)                               ─┘                    ↓
+                                                                      攒批/冷却(日均1-2封)
+                                                                           ↓
+                                                              📧 HTML邮件(卡片+中文编译全文)
 ```
 
-## 三层降噪（不是每条新闻都发）
+## 快速复用（3 步）
 
-1. **双维度评估**：关键词先粗筛（主体词 +2/个、发布动作 +3、版本号 +2；宕机吐槽/教程/硬件折腾强扣，不过线直接丢弃）；
-   过线条目由 LLM 通读正文打两个分：**通用影响力**（1-10，标尺见调参表）+ **个人相关性**（高/中/低，高相关标 ★）；
-   影响力≤`influence_floor` 不入池，唯一豁免：高个人相关且影响力 5 分。个人画像存 `secrets.local.json` 的 `USER_PROFILE`（或环境变量），不入库
-2. **主题聚类**：同一事件的多条报道（官方博客+HN+中文媒体常常三连发）聚合成一条，
-   领衔条目带摘要 + "相关报道 N 条"
-3. **攒批发送**（默认 1~2 封/天）：攒够 6 条或最老一条等满 5 小时才发；
-   普通邮件间隔冷却 10 小时；**重大新闻（高分）跳过所有规则立即发**——
-   各家一起放大招的日子一天十几封也正常，平淡的日子一封都没有也正常
+### 1. 克隆 + 配置
 
-所有节奏参数在 `config.json` 里可调。
-
-## 快速开始
-
-### 方式 A：本地常驻（Windows，推荐）
-
-```powershell
+```bash
 git clone https://github.com/<你的用户名>/ai-radar.git
 cd ai-radar
-copy secrets.example.json secrets.local.json   # 填入你的推送通道（下表五选一）
-python radar.py --test                          # 验证通道
-python radar.py                                 # 跑一轮（首跑建基线不发送）
-powershell -ExecutionPolicy Bypass -File install-task.ps1   # 注册两阶段任务：Eval 每2小时:45 评估 / Send 每2小时整点发送
+pip install certifi                    # 唯一依赖
+cp secrets.example.json secrets.local.json
+# 编辑 secrets.local.json：
+#   - 填一个推送通道（推荐 SMTP 邮件，免费不限量）
+#   - 填 user_profile（你的职业背景，驱动"个人相关性"判断）
+python radar.py --test                 # 验证通道
 ```
 
-### 方式 B：GitHub Actions 云端 24/7
+### 2. 跑一轮看看效果
 
-1. 使用本仓库模板新建仓库
-2. Settings → Secrets → Actions 添加推送通道 secret（下表）
-3. 编辑 `.github/workflows/radar.yml`，把 `cron` 两行取消注释
-4. Actions 页手动 Run 一次（首跑建基线）
+```bash
+python radar.py                        # 首跑建基线（不推送）
+python radar.py --send-now             # 立即扫描+评估+推送（体验完整流程）
+python radar.py --dry-run              # 只看会发什么，不发送
+```
 
-> ⚠️ 云端与本机二选一，同时开会双倍发邮件（两边状态独立）。
+### 3. 装定时任务（自动运行）
+
+```powershell
+# Windows：每 2 小时 :45 评估 → 整点 :00 发送
+powershell -ExecutionPolicy Bypass -File install-task.ps1
+```
+
+Linux/macOS 用 cron：
+```
+45 */2 * * * cd /path/to/ai-radar && python3 radar.py --eval-only
+0 1-23/2 * * * cd /path/to/ai-radar && python3 radar.py --send-only
+```
+
+## 核心机制
+
+### 六层筛选漏斗（80 条候选 → 4 条入池 → 1 封邮件）
+
+| 层 | 干什么 | 效果 |
+|---|---|---|
+| 1. 关键词预筛 | 每个源自定义关键词 | 砍掉不相关源内容 |
+| 2. 跨源去重 | 同一主题多家报道只留最高分代表 | 省 30~50% LLM 调用 |
+| 3. LLM 影响力评估 | 通读正文，输出 1-10 分 | 10=全球旗舰发布，9=国产旗舰，8=重要工具… |
+| 4. 门槛拦截 | ≤5 分丢弃；中文媒体单独 ≤6 | 营销/体验帖/边缘内容沉底 |
+| 5. 个人相关性 | 高相关可救 5 分入池 | 与你技术栈匹配的项目不漏 |
+| 6. 攒批+冷却 | 攒够条数/时间或重大新闻触发 | 日均 1~2 封 |
+
+### 分型编译（每条动态自带完整中文内容）
+
+| 内容类型 | 邮件里的格式 |
+|---|---|
+| 新闻/模型发布 | 整理 → 翻译 → 总结，500~1200 字编译稿 |
+| 工具/项目 | 这是什么 → 为什么对你有用 → 怎么上手 → 别人怎么用 → 注意事项 |
+| 论文 | 核心发现 + 实际意义 |
+
+### 双维度独立评估
+
+- **影响力**（通用）：不受个人偏好污染，反映全行业分量
+- **个人相关性**（定制）：由 `user_profile` 驱动，高相关项目加 ★ 标记并可豁免门槛
+
+## 消息源（sources.json）
+
+39 个活跃源，六类覆盖。加源/关源/改关键词改这个文件即可：
+
+| 类别 | 示例 | 配置方式 |
+|---|---|---|
+| 海外官方 | OpenAI/DeepMind/Google/MS/NVIDIA/HF | 官方 RSS 直连 |
+| 海外媒体 | TechCrunch/MIT TR/Ars/Wired/Interconnects | 垂类 RSS |
+| 海外快讯 | smol.ai AI News(X聚合)/AlphaSignal | Newsletter RSS |
+| 社区雷达 | HN 双档(300/150分)/LMArena/GitHub Trending | 热度过滤 |
+| 论文雷达 | HF 每日论文/arXiv 重大(HN≥150) | 社区精选 |
+| 国产官方 | DeepSeek GitHub/智谱/Qwen/Kimi HF 监视 | tags.atom/watch |
+
+特殊源类型：
+- `"type": "watch"` — 监视页面变化（如 LMArena 新模型上榜、HF 新权重上架）
+- `"skip_score": true` — 跳过标题评分（适合纯版本号源）
+- `"search_desc": true` — 关键词也搜摘要（适合学术源）
 
 ## 推送通道（五选一，全免费）
 
-| 通道 | secrets / secrets.local.json 键 | 获取 |
+| 通道 | 配置键 | 说明 |
 |---|---|---|
-| **邮件**（推荐） | `SMTP_HOST/PORT/USER/PASS/TO` | QQ邮箱：设置→账户→开SMTP→授权码 |
-| 企业微信机器人 | `WECOM_WEBHOOK` | 群机器人 Webhook，不限量 |
-| Server酱 | `SERVERCHAN_KEY` | sct.ft07.com，免费 5 条/天 |
-| WxPusher | `WXPUSHER_TOKEN`+`WXPUSHER_UID` | wxpusher.zjiecode.com |
-| PushPlus | `PUSHPLUS_TOKEN` | pushplus.plus |
+| **邮件** | `SMTP_HOST/PORT/USER/PASS/TO` | 推荐，QQ 邮箱免费不限量；`smtp_to` 逗号分隔多收件人；测试消息只发首个 |
+| 企业微信 | `WECOM_WEBHOOK` | 群机器人 |
+| Server酱 | `SERVERCHAN_KEY` | 微信推送，5 条/天 |
+| WxPusher | `WXPUSHER_TOKEN`+`UID` | 微信推送 |
+| PushPlus | `PUSHPLUS_TOKEN` | 备用 |
 
-## 摘要通道（三级自动降级，语言可配）
+## 摘要通道（三级降级）
 
 | 级别 | 配置 | 说明 |
 |---|---|---|
-| 1. OpenAI 兼容 API | `SUMMARY_API_KEY`（+可选 `SUMMARY_API_BASE`/`SUMMARY_MODEL`） | DeepSeek/GLM/SiliconFlow/OpenAI 均可，几分钱/天 |
-| 2. 本机 Claude Code CLI | 装了 Claude Code 即自动发现（`SUMMARY_MODE=claude` 可强制） | 走你已有的 CLI 订阅 |
-| 3. 抽取式摘要 | 零配置 | 正文前 3 句，永远兜底 |
-
-摘要语言由 `config.json` 的 `summary_language` 控制（默认 `中文`，可改 `English`、`日本語` 等）。
+| 1. OpenAI 兼容 API | `SUMMARY_API_KEY/BASE/MODEL` | DeepSeek/GLM/SiliconFlow 均可 |
+| 2. 本机 Claude Code CLI | 自动检测 | 走已有订阅 |
+| 3. 抽取式 | 零配置 | 正文前 3 句，永远兜底 |
 
 ## 调参（config.json）
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `min_score` | 4 | 入选门槛，调高更严 |
-| `high_score` | 7 | 关键词高分兜底线（LLM 不可用时） |
-| `high_influence` | 8 | LLM 影响力线：≥此值立即发+冷却豁免（标尺：10=全球旗舰发布，9=国产旗舰，8=重要衍生/旗舰工具） |
-| `influence_floor` | 5 | 影响力≤此值不入池（高个人相关且=5 者豁免） |
+| `min_score` | 4 | 关键词预筛门槛 |
+| `high_score` | 7 | 关键词高分兜底线 |
+| `high_influence` | 8 | LLM 影响力线：≥此值立即发 |
+| `influence_floor` | 5 | 通用入池门槛（≤此值丢弃） |
+| `influence_floor_cn` | 6 | 中文媒体单独门槛（降权） |
 | `batch_min_items` | 6 | 攒几条发一封 |
 | `batch_max_age_minutes` | 300 | 最老条目等待上限 |
-| `send_cooldown_minutes` | 600 | 两封普通邮件最小间隔（10 小时 ≈ 每天 1~2 封） |
-| `max_per_email` | 12 | 单封邮件（聚类后）条数上限 |
-| `old_cutoff_days` | 7 | 发布时间超过 N 天的条目直接忽略 |
-| `summary_mode` | auto | auto / api / claude（+抽取式兜底） |
-| `summary_language` | 中文 | 摘要输出语言 |
+| `send_cooldown_minutes` | 600 | 普通邮件冷却（10h≈1-2封/天） |
+| `summary_language` | 中文 | 编译输出语言 |
+| `summary_mode` | auto | auto/api/claude |
 
-消息源在 `sources.json`：官方 RSS 直连 + GitHub tags + HN 关键词热帖 + LMArena 榜单
-变动监视（新模型上榜即报，含匿名款被识破）+ HF 每日论文 + arXiv 重大论文（HN≥150 赞）
-+ 国产官方 HF 模型库监视（GLM/Qwen/Kimi 新权重上架即报）+ 量子位。加源/关源/改关键词改这个文件即可。
-
-## 命令
+## 命令速查
 
 ```
-python radar.py              # 常规扫描（定时任务调用的就是这个）
-python radar.py --dry-run    # 只看会发什么，不发送
-python radar.py --send-now   # 立即把待发池整封发出
-python radar.py --eval-only   # 只扫描+评估+入池（定时 :45 调用）
-python radar.py --send-only   # 只处理待发池（定时整点发送窗口）
-python radar.py --test       # 推送通道测试
-python radar.py --init       # 重建基线（换源后防止旧消息涌入）
-python radar.py --export-md  # 导出最近7天发送历史为markdown素材（可跟天数：--export-md 14）
-python radar.py --profile-suggest  # 用近30天★高相关记录起草新版个人画像
+python radar.py                # 常规：扫描+评估+推送
+python radar.py --eval-only    # 只扫描+评估入池，不推送（配合定时 :45）
+python radar.py --send-only    # 只处理待发池（配合定时整点 :00）
+python radar.py --send-now     # 立即推送（测试用）
+python radar.py --dry-run      # 只看会发什么
+python radar.py --test         # 推送通道测试（只发首个收件人）
+python radar.py --init         # 重建基线（换源后防旧消息涌入）
 ```
 
-## 致谢与许可
+## 已知边界
 
-数据来自各公司官方渠道、[RSSHub](https://docs.rsshub.app/)、[hnrss](https://hnrss.org/)、
-arXiv、HuggingFace、LMArena、量子位。[MIT License](LICENSE)
+- 国内网络下部分海外源偶发 SSL 断连 → 自动走本机代理（`RADAR_PROXY` 环境变量）或下轮重试
+- 某些公司无官方 RSS（xAI/Mistral/MiniMax/月之暗面）→ 由 HN/快讯层兜底
+- LLM 评估耗时与条目数成正比 → 跨源去重已省 30~50% 调用
+
+## 许可
+
+[MIT License](LICENSE) · 零依赖纯 Python · 消息源数据来自各公司官方渠道、[RSSHub](https://docs.rsshub.app/)、[hnrss](https://hnrss.org/)、arXiv、HuggingFace
