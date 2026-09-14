@@ -369,6 +369,8 @@ def _disp_title(it):
 def _disp_meta(it):
     """元信息行：来源 · 时间 · 影响力分 · 原题（双维度透明展示）"""
     m = '%s · %s' % (it.get('source', ''), _tstr(it))
+    if it.get('extra_sources'):
+        m += '(+%d源)' % len(it['extra_sources'])
     if it.get('influence'):
         m += ' · 影响%s' % it['influence']
     if it.get('relevant'):
@@ -1124,28 +1126,48 @@ def main():
         print('基线建立完成：记录 %d 条当前条目，本次不推送。' % len(fresh))
         return
 
-    # ---- 新条目：理解式评估（GLM 通读正文 -> 中文标题/影响力/摘要）后入待发池 ----
+    # ---- 新条目：先跨源去重（同主题只评估最高分代表），再 LLM 评估入池 ----
     now_ms = int(time.time() * 1000)
     pending = state.setdefault('pending', [])
-    for i, it in enumerate(fresh):
+    for it in fresh:
         state['seen'][it['_key']] = it['title'][:80]
+
+    # 跨源去重：按 cluster_key 分组，每组只留分数最高的 1 条送评估（其余标 seen）
+    deduped = []
+    topic_groups = {}
+    for it in sorted(fresh, key=lambda x: x.get('score', 0), reverse=True):
+        ck = cluster_key(it['title'])
+        if ck is None:
+            deduped.append(it)
+        elif ck not in topic_groups:
+            topic_groups[ck] = it
+            deduped.append(it)
+        else:
+            rep = topic_groups[ck]
+            rep.setdefault('_dup_sources', []).append(it['source'])
+    print('跨源去重：%d 条 -> %d 个主题（省 %d 次 LLM 调用）'
+          % (len(fresh), len(deduped), len(fresh) - len(deduped)))
+
+    for i, it in enumerate(deduped):
         art = fetch_article(it['link'])
         it['title_cn'], it['influence'], it['summary'], it['relevant'] = summarize(it['title'], art)
         inf = it.get('influence')
         gate = INFLUENCE_FLOOR_CN if it.get('group') == '中文媒体' else INFLUENCE_FLOOR
-        print('  评估%d/%d 影响%s%s %s' % (i + 1, len(fresh), inf or '-',
+        print('  评估%d/%d 影响%s%s %s' % (i + 1, len(deduped), inf or '-',
                                            '★' if it.get('relevant') else '',
                                            (it.get('title_cn') or it['title'])[:36]))
         if inf is not None and inf <= gate:
-            # 门槛拦截（营销/个案/体验帖）；唯一豁免：高个人相关 且 影响力 5 分
             if not (it.get('relevant') and inf == 5):
                 continue
-        pending.append({'title': it['title'], 'link': it['link'], 'source': it['source'],
-                        'group': it.get('group', ''), '_key': it['_key'],
-                        '_ts': now_ms, 'score': it.get('score', 0),
-                        '_dt': _dt_ms(it.get('dt')),
-                        'title_cn': it.get('title_cn'), 'summary': it.get('summary', ''),
-                        'influence': inf, 'relevant': it.get('relevant', False)})
+        entry = {'title': it['title'], 'link': it['link'], 'source': it['source'],
+                 'group': it.get('group', ''), '_key': it['_key'],
+                 '_ts': now_ms, 'score': it.get('score', 0),
+                 '_dt': _dt_ms(it.get('dt')),
+                 'title_cn': it.get('title_cn'), 'summary': it.get('summary', ''),
+                 'influence': inf, 'relevant': it.get('relevant', False)}
+        if it.get('_dup_sources'):
+            entry['extra_sources'] = it['_dup_sources']
+        pending.append(entry)
     save_state(state)
 
     if args.eval_only:
