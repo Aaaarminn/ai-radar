@@ -71,6 +71,7 @@ MIN_SCORE = int(CFG.get('min_score', 4))            # 入选门槛（关键词�
 HIGH_SCORE = int(CFG.get('high_score', 7))          # 关键词高分兜底（LLM 不可用时）
 HIGH_INFLUENCE = int(CFG.get('high_influence', 8))  # LLM 影响力≥此值：立即发+冷却豁免
 INFLUENCE_FLOOR = int(CFG.get('influence_floor', 5))  # 影响力≤此值：评估后直接不入池
+INFLUENCE_FLOOR_CN = int(CFG.get('influence_floor_cn', 6))  # 中文媒体单独门槛（量子位降权）
 SEND_COOLDOWN = int(CFG.get('send_cooldown_minutes', 600))   # 两封普通邮件最小间隔（10小时≈每天1-2封）
 BATCH_MIN_ITEMS = int(CFG.get('batch_min_items', 6))  # 攒够 N 条发一封
 BATCH_MAX_AGE = int(CFG.get('batch_max_age_minutes', 300))  # 或最早一条已等 N 分钟
@@ -1056,8 +1057,10 @@ def main():
             continue
         kws = [k.lower() for k in src.get('keywords', [])]
         use_desc = bool(src.get('search_desc', False))
-        need_score = (src.get('group', '') in SCORED_GROUPS
+        group = src.get('group', '')
+        need_score = (group in SCORED_GROUPS
                       and not src.get('skip_score', False))   # GitHub tag 源豁免（标题纯版本号）
+        inf_floor = (INFLUENCE_FLOOR_CN if group == '中文媒体' else INFLUENCE_FLOOR)
         cap = int(src.get('max_items', 0))
         kept = 0
         for title, link, dstr, desc in items:
@@ -1076,7 +1079,7 @@ def main():
             if dt is not None and is_too_old(dt):
                 continue
             fresh.append({'title': title, 'link': link, 'source': src['name'],
-                          'group': src.get('group', ''), 'dt': dt, '_key': key,
+                          'group': group, 'dt': dt, '_key': key,
                           'score': sc if need_score else 9})
             run_seen.add(key)
             kept += 1
@@ -1126,11 +1129,12 @@ def main():
         art = fetch_article(it['link'])
         it['title_cn'], it['influence'], it['summary'], it['relevant'] = summarize(it['title'], art)
         inf = it.get('influence')
+        gate = INFLUENCE_FLOOR_CN if it.get('group') == '中文媒体' else INFLUENCE_FLOOR
         print('  评估%d/%d 影响%s%s %s' % (i + 1, len(fresh), inf or '-',
                                            '★' if it.get('relevant') else '',
                                            (it.get('title_cn') or it['title'])[:36]))
-        if inf is not None and inf <= INFLUENCE_FLOOR:
-            # 通用门槛拦截（营销/个案/体验帖）；唯一豁免：高个人相关 且 影响力 5 分
+        if inf is not None and inf <= gate:
+            # 门槛拦截（营销/个案/体验帖）；唯一豁免：高个人相关 且 影响力 5 分
             if not (it.get('relevant') and inf == 5):
                 continue
         pending.append({'title': it['title'], 'link': it['link'], 'source': it['source'],
