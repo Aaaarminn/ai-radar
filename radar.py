@@ -461,15 +461,21 @@ def build_html(title, items):
                 parts.append('<div style="font-size:13px;color:#37424e;line-height:1.7;'
                              'background:#f8fafc;border-left:3px solid #0288D1;'
                              'padding:10px 12px;border-radius:0 6px 6px 0;">%s</div>' % lines)
+            # 详细编译：完整中文翻译/改写（替代打开原文）
+            if it.get('full_text'):
+                for para in it['full_text'].split('\n'):
+                    p = para.strip()
+                    if len(p) > 2:
+                        parts.append('<div style="font-size:13px;color:#2c3640;line-height:1.8;'
+                                     'margin:6px 0 0 0;">%s</div>' % _esc(p))
             if it.get('_related_n'):
                 parts.append('<div style="font-size:12px;color:#8a95a1;margin-top:6px;">'
                              '└ 相关报道 %d 条：%s</div>'
                              % (it['_related_n'], _esc('；'.join(it['_related']))))
             if it.get('link'):
-                parts.append('<a href="%s" style="display:inline-block;font-size:12px;'
-                             'color:#0288D1;text-decoration:none;margin-top:8px;'
-                             'border:1px solid #b3d7f2;border-radius:6px;padding:3px 10px;">'
-                             '阅读原文 →</a>' % _esc(it['link']))
+                parts.append('<a href="%s" style="font-size:10px;color:#b0bcc8;'
+                             'text-decoration:none;margin-top:8px;display:inline-block;">'
+                             '原文：%s</a>' % (_esc(it['link']), _esc(it['link'])[:60]))
             parts.append('</div>')
     parts.append('<div style="text-align:center;font-size:11px;color:#a5b0bc;'
                  'padding:10px 0 4px;">由 AI-Radar 自动生成 · 评分过滤 / 主题聚类 / LLM 摘要</div>')
@@ -671,8 +677,8 @@ def _sent_cut(s, limit):
 
 
 def summarize(title, text):
-    """理解式评估：通读正文后输出 (中文标题|None, 影响力1-10|None, 摘要, 高相关|False)。
-    配置了 user_profile / USER_PROFILE 时追加"个人相关性"判断：高相关 +1 分（封顶10）。"""
+    """理解式评估：通读正文后输出 (中文标题, 影响力, 摘要, 高相关, 详细编译)。
+    详细编译=完整中文翻译/改写(500-1500字)，替代打开原文。"""
     mode = (os.environ.get('SUMMARY_MODE') or CFG.get('summary_mode', 'auto')).lower()
     lang = (os.environ.get('SUMMARY_LANGUAGE') or CFG.get('summary_language', '中文'))
     profile = _sec('USER_PROFILE') or CFG.get('user_profile', '')
@@ -693,10 +699,10 @@ def summarize(title, text):
     if profile:
         fmt_lines.append('个人相关性：<高/中/低。用户画像：%s。'
                          '判断该内容对画像用户的匹配度>' % profile)
-    fmt_lines.append('摘要：<用精炼的%s总结，1~3句、总共不超过120字；只保留最有信息量的要点'
-                     '（新东西是什么/谁做的/多强/关键数据），删除铺垫、修饰与重复；'
-                     '摘要里禁止出现媒体名、记者名、发布日期、"据报道"等一切来源信息；'
-                     '忽略正文里的HTML标签或代码垃圾>' % lang)
+    fmt_lines.append('摘要：<用精炼的%s总结，1~3句、总共不超过120字>' % lang)
+    fmt_lines.append('详细编译：<把正文完整翻译/编译成流畅%s，保留所有关键信息'
+                     '（技术细节、数据、背景、意义），删掉广告和废话；'
+                     '长度500~1500字，用自然段落分隔；禁止出现媒体名/记者名/日期>' % lang)
     fmt_lines.append('标题：%s' % title)
     fmt_lines.append('正文节选：%s' % (excerpt if excerpt else '（无正文，按标题评估）'))
     prompt = '\n'.join(fmt_lines)
@@ -708,7 +714,8 @@ def summarize(title, text):
     if s:
         m_t = re.search(r'中文标题[:：]\s*(.+)', s)
         m_i = re.search(r'影响力[:：]\s*[^0-9]*(\d{1,2})', s)
-        m_s = re.search(r'摘要[:：]\s*([\s\S]+)', s)
+        m_s = re.search(r'摘要[:：]\s*([\s\S]*?)(?:\n详细编译[:：]|$)', s)
+        m_f = re.search(r'详细编译[:：]\s*([\s\S]+)', s)
         title_cn = None
         if m_t:
             t = re.split(r'\s*(?:影响力|个人相关性|摘要)[:：]', m_t.group(1))[0].strip()
@@ -719,6 +726,7 @@ def summarize(title, text):
             m_r = re.search(r'个人相关性[:：]\s*(高|中|低)', s)
             relevant = bool(m_r and m_r.group(1) == '高')
         summary = m_s.group(1).strip() if m_s else s.strip()
+        full_text = m_f.group(1).strip() if m_f else ''
         title_cn = _strip_meta(title_cn) if title_cn else None
         summary = _strip_meta(summary)
         if title_cn and title_cn == title:
@@ -740,11 +748,11 @@ def summarize(title, text):
                              '（产品名/型号保留原文）：' + title)
             if t2 and _has_cjk(t2):
                 title_cn = _strip_meta(t2.splitlines()[0])[:120]
-        return title_cn, influence, _sent_cut(summary, 220), relevant
+        return title_cn, influence, _sent_cut(summary, 220), relevant, full_text[:2000]
     if text:
         sents = re.split(r'(?<=[。！？!?])', text)[:3]
-        return None, None, _sent_cut(''.join(sents), 200), False
-    return None, None, '', False
+        return None, None, _sent_cut(''.join(sents), 200), False, text[:1500]
+    return None, None, '', False, ''
 
 
 # ---------------------------------------------------------------- 主题聚类（同一事件多条报道 -> 一条）
@@ -851,7 +859,7 @@ def flush_pending(state, force=False, slot=False):
         if not it.get('summary'):        # 老池子条目补评估
             art = fetch_article(it['link'])
             (it['title_cn'], it['influence'],
-             it['summary'], it['relevant']) = summarize(it['title'], art)
+             it['summary'], it['relevant'], it['full_text']) = summarize(it['title'], art)
 
     subject = '🤖 AI 雷达：%d 条动态' % len(chosen)
     if len(pending) > len(chosen):
@@ -1151,7 +1159,7 @@ def main():
 
     for i, it in enumerate(deduped):
         art = fetch_article(it['link'])
-        it['title_cn'], it['influence'], it['summary'], it['relevant'] = summarize(it['title'], art)
+        it['title_cn'], it['influence'], it['summary'], it['relevant'], it['full_text'] = summarize(it['title'], art)
         inf = it.get('influence')
         gate = INFLUENCE_FLOOR_CN if it.get('group') == '中文媒体' else INFLUENCE_FLOOR
         print('  评估%d/%d 影响%s%s %s' % (i + 1, len(deduped), inf or '-',
@@ -1165,7 +1173,8 @@ def main():
                  '_ts': now_ms, 'score': it.get('score', 0),
                  '_dt': _dt_ms(it.get('dt')),
                  'title_cn': it.get('title_cn'), 'summary': it.get('summary', ''),
-                 'influence': inf, 'relevant': it.get('relevant', False)}
+                 'influence': inf, 'relevant': it.get('relevant', False),
+                 'full_text': it.get('full_text', '')}
         if it.get('_dup_sources'):
             entry['extra_sources'] = it['_dup_sources']
         pending.append(entry)
