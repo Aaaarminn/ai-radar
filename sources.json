@@ -47,6 +47,13 @@
   },
   { "name": "Google 官方博客",   "group": "海外官方", "url": "https://blog.google/rss/",
     "keywords": ["gemini", "deepmind", "google ai", "veo", "imagen", "notebooklm", "tpu", "gemma"] },
+  {
+    "name": "Microsoft Research", "group": "海外官方", "url": "https://www.microsoft.com/en-us/research/feed/",
+    "search_desc": true, "skip_score": true, "max_items": 5,
+    "keywords": ["ai", "llm", "agent", "model", "machine learning"]
+  },
+  { "name": "NVIDIA 博客",       "group": "海外官方", "url": "https://blogs.nvidia.com/feed/", "skip_score": true, "max_items": 5 },
+  { "name": "HuggingFace 博客",  "group": "海外官方", "url": "https://huggingface.co/blog/feed.xml", "skip_score": true, "max_items": 5 },
   { "name": "TechCrunch AI",     "group": "海外媒体", "url": "https://techcrunch.com/category/artificial-intelligence/feed/", "max_items": 12 },
   { "name": "The Verge AI",      "group": "海外媒体", "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml", "max_items": 10 },
   {
