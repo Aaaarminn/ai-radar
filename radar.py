@@ -483,6 +483,9 @@ ENTITIES = [
     '智谱', 'glm', 'qwen', '通义', 'kimi', '月之暗面', 'moonshot', 'minimax',
     '豆包', 'doubao', '文心', 'ernie', '李飞飞', 'hinton', 'lecun', 'karpathy',
     'sutskever', 'sora', 'midjourney', 'astra', 'fable', 'mythos',
+    'nvidia', 'microsoft', 'perplexity', 'cohere', 'stability', 'groq',
+    'siliconflow', '阶跃', 'stepfun', '面壁', 'baichuan', '百川', '混元',
+    'hunyuan', '零一', '01.ai', 'deepseek-v', 'harness',
 ]
 RELEASE_WORDS = [
     'release', 'launch', 'announc', 'unveil', 'introduc', 'roll out', 'ship',
