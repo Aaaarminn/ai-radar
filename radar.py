@@ -461,19 +461,29 @@ def build_html(title, items):
                 parts.append('<div style="font-size:13px;color:#37424e;line-height:1.7;'
                              'background:#f8fafc;border-left:3px solid #0288D1;'
                              'padding:10px 12px;border-radius:0 6px 6px 0;">%s</div>' % lines)
-            # 详细编译：结构化分析报告（替代打开原文）
+            # 详细编译：默认折叠，点"展开正文"按钮显示（<details> 纯 HTML，无 JS）
             if it.get('full_text'):
+                body = []
                 for para in it['full_text'].split('\n'):
                     p = para.strip()
                     if len(p) > 2:
                         if p.startswith('【'):
-                            parts.append('<div style="font-size:13px;font-weight:bold;'
-                                         'color:#01579B;margin:12px 0 4px 0;'
-                                         'padding-bottom:2px;border-bottom:1px solid #e0e8ef;">'
-                                         '%s</div>' % _esc(p))
+                            body.append('<div style="font-size:13px;font-weight:bold;'
+                                        'color:#01579B;margin:12px 0 4px 0;'
+                                        'padding-bottom:2px;border-bottom:1px solid #e0e8ef;">'
+                                        '%s</div>' % _esc(p))
                         else:
-                            parts.append('<div style="font-size:13px;color:#2c3640;line-height:1.8;'
-                                         'margin:4px 0 0 0;">%s</div>' % _esc(p))
+                            body.append('<div style="font-size:13px;color:#2c3640;line-height:1.8;'
+                                        'margin:4px 0 0 0;">%s</div>' % _esc(p))
+                if body:
+                    parts.append('<details style="margin-top:10px;">'
+                                 '<summary style="display:inline-block;background:#eef4fb;'
+                                 'color:#01579B;border:1px solid #b9d2ea;border-radius:14px;'
+                                 'padding:4px 16px;font-size:12px;font-weight:bold;'
+                                 'cursor:pointer;-webkit-user-select:none;user-select:none;'
+                                 'list-style:none;">▸ 展开正文</summary>'
+                                 '<div style="padding:2px 2px 0 2px;">%s</div></details>'
+                                 % ''.join(body))
             if it.get('_related_n'):
                 parts.append('<div style="font-size:12px;color:#8a95a1;margin-top:6px;">'
                              '└ 相关报道 %d 条：%s</div>'
