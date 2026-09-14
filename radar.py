@@ -269,13 +269,14 @@ def push_wxpusher(token, uid, title, content):
 
 
 def push_smtp(cfg, title, items):
-    """邮件通道：HTML 卡片排版 + 纯文本降级；smtp_to 支持逗号分隔多收件人"""
+    """邮件通道：HTML 卡片排版 + 纯文本降级；多收件人；测试消息只发首个"""
     import smtplib
     from email.header import Header
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
     recipients = [r.strip() for r in str(cfg['to']).split(',') if r.strip()]
     if isinstance(items, str):
+        recipients = recipients[:1]   # 测试消息只发首个收件人
         html, plain = '<pre style="font-family:sans-serif;">%s</pre>' % _esc(items), items
     else:
         html, plain = build_html(title, items), build_plain(items)
