@@ -1,13 +1,13 @@
 {
-  "min_score": 4,
+  "min_score": 6,
   "high_score": 7,
   "high_influence": 8,
-  "influence_floor": 5,
-  "batch_min_items": 6,
-  "batch_max_age_minutes": 300,
+  "influence_floor": 6,
+  "batch_min_items": 8,
+  "batch_max_age_minutes": 720,
   "max_per_email": 12,
   "summary_limit": 8,
-  "send_cooldown_minutes": 600,
+  "send_cooldown_minutes": 720,
   "old_cutoff_days": 7,
   "summary_mode": "auto",
   "summary_language": "中文"
