@@ -854,6 +854,82 @@ def handle_watch(src, state):
              'group': src.get('group', ''), 'dt': None, '_key': key}]
 
 
+SENT_DEDUPE_DAYS = int(CFG.get('sent_dedupe_days', 7))  # 发过的故事 N 天内不再推（跨源标题变体也算重）
+
+_TOK_STOP = {'the', 'a', 'an', 'of', 'for', 'and', 'in', 'on', 'to', 'with', 'new',
+             'how', 'its', 'is', 'are', 'by', 'at', 'as', 'be', 'this', 'that',
+             'from', 'into', 'over', 'after', 'before', 'than', 'then', 'they',
+             'you', 'your', 'we', 'our', 'it'}
+_CJK_STOP = {'什么', '今天', '没有', '一个', '我们', '他们', '可以', '已经'}
+
+
+def _norm_url(u):
+    """URL 归一化：去 query/大小写/www，只留 域名+路径"""
+    try:
+        p = urllib.parse.urlsplit((u or '').strip().lower())
+        host = p.netloc[4:] if p.netloc.startswith('www.') else p.netloc
+        return (host, p.path.rstrip('/'))
+    except Exception:  # noqa: BLE001
+        return ('', (u or '').strip().lower())
+
+
+def _title_tokens(t):
+    """标题特征词：(英文词/版本号集合, 中文重叠双字集合)，分开返回互不稀释"""
+    t = (t or '').lower()
+    latin = set()
+    for x in re.findall(r'[a-z]{2,}|\d+(?:\.\d+)*', t):
+        if x in _TOK_STOP:
+            continue
+        if len(x) < 2 and '.' not in x:      # 丢掉单个数字（噪声）
+            continue
+        latin.add(x)
+    cjk = set()
+    for m in re.finditer(r'(?=([\u4e00-\u9fff]{2}))', t):
+        if m.group(1) not in _CJK_STOP:
+            cjk.add(m.group(1))
+    return latin, cjk
+
+
+def _sent_fingerprints():
+    """近 N 天已推条目的指纹：(URL 集合, 标题 token 集合列表)"""
+    urls, toksets = set(), []
+    try:
+        with open(SENT_LOG_PATH, encoding='utf-8') as f:
+            log = json.load(f)
+    except Exception:  # noqa: BLE001
+        return urls, toksets
+    cut = time.time() * 1000 - SENT_DEDUPE_DAYS * 86400000
+    for rec in log:
+        if rec.get('ts', 0) < cut:
+            continue
+        for it in rec.get('items', []):
+            if it.get('l'):
+                urls.add(_norm_url(it['l']))
+            la, cj = _title_tokens(it.get('t'))
+            if len(la) + len(cj) >= 2:
+                toksets.append((la, cj))
+    return urls, toksets
+
+
+def _recently_sent(item, urls, toksets):
+    """URL 相同，或 英文特征词共享≥3且包含度≥0.5，或 中文双字共享≥4且包含度≥0.6 → 判为已推过"""
+    if _norm_url(item.get('link')) in urls:
+        return True
+    la, cj = _title_tokens(item.get('title_cn') or item.get('title'))
+    if len(la) + len(cj) < 2:
+        return False
+    for bla, bcj in toksets:
+        if la and bla:
+            inter = len(la & bla)
+            if inter >= 3 and inter / min(len(la), len(bla)) >= 0.5:
+                return True
+        if cj and bcj:
+            inter = len(cj & bcj)
+            if inter >= 4 and inter / min(len(cj), len(bcj)) >= 0.6:
+                return True
+    return False
+
+
 def flush_pending(state, force=False, slot=False):
     """发送窗口：处理待发池（聚类->补摘要->推送）。slot=True 表示整点窗口模式：有料就发。"""
     pending = state.setdefault('pending', [])
@@ -861,6 +937,17 @@ def flush_pending(state, force=False, slot=False):
         print('无新消息（待发池空）。')
         save_state(state)
         return
+
+    # 跨邮件去重：近 N 天已推过的故事（同 URL 或跨源标题变体）直接拦下
+    urls, toksets = _sent_fingerprints()
+    deduped = [p for p in pending if not _recently_sent(p, urls, toksets)]
+    if len(deduped) < len(pending):
+        print('跨邮件去重：拦下 %d 条近 %d 天已推过的重复。' % (len(pending) - len(deduped), SENT_DEDUPE_DAYS))
+        state['pending'] = pending = deduped
+        save_state(state)
+        if not deduped:
+            print('去重后待发池为空，本次不发。')
+            return
     now_ms = int(time.time() * 1000)
     oldest_age = (now_ms - min(p['_ts'] for p in pending)) / 60000.0
     # 只有 LLM 影响力算"重大"；关键词 score 不再豁免冷却（防大厂关键词刷屏）
