@@ -73,6 +73,7 @@ HIGH_INFLUENCE = int(CFG.get('high_influence', 8))  # LLM 影响力≥此值：�
 INFLUENCE_FLOOR = int(CFG.get('influence_floor', 5))  # 影响力≤此值：评估后直接不入池
 INFLUENCE_FLOOR_CN = int(CFG.get('influence_floor_cn', 6))  # 中文媒体单独门槛（量子位降权）
 SEND_COOLDOWN = int(CFG.get('send_cooldown_minutes', 600))   # 两封普通邮件最小间隔（10小时≈每天1-2封）
+HIGH_COOLDOWN = int(CFG.get('high_cooldown_minutes', 180))   # 重大新闻（≥HIGH_INFLUENCE）独立冷却：再大也最多每3小时一封
 BATCH_MIN_ITEMS = int(CFG.get('batch_min_items', 6))  # 攒够 N 条发一封
 BATCH_MAX_AGE = int(CFG.get('batch_max_age_minutes', 300))  # 或最早一条已等 N 分钟
 MAX_PER_EMAIL = int(CFG.get('max_per_email', 12))   # 单封邮件（聚类后）最多条数
@@ -862,20 +863,18 @@ def flush_pending(state, force=False, slot=False):
         return
     now_ms = int(time.time() * 1000)
     oldest_age = (now_ms - min(p['_ts'] for p in pending)) / 60000.0
-    has_high = any((p.get('influence') or 0) >= HIGH_INFLUENCE
-                   or p.get('score', 0) >= HIGH_SCORE for p in pending)
+    # 只有 LLM 影响力算"重大"；关键词 score 不再豁免冷却（防大厂关键词刷屏）
+    has_high = any((p.get('influence') or 0) >= HIGH_INFLUENCE for p in pending)
     since_last = (now_ms - state.get('last_sent', 0)) / 60000.0
 
-    if slot:
-        send = force or has_high or since_last >= SEND_COOLDOWN
-    else:
-        send = (force or has_high or len(pending) >= BATCH_MIN_ITEMS
-                or oldest_age >= BATCH_MAX_AGE)
-        if send and not (force or has_high) and since_last < SEND_COOLDOWN:
-            send = False
+    high_ok = has_high and since_last >= HIGH_COOLDOWN
+    batch_ok = ((len(pending) >= BATCH_MIN_ITEMS or oldest_age >= BATCH_MAX_AGE)
+                and since_last >= SEND_COOLDOWN)
+    send = bool(force) or high_ok or batch_ok
     if not send:
-        print('攒批中：%d 条待发（最早已等 %d 分钟，冷却剩 %d 分钟）'
-              % (len(pending), int(oldest_age), max(0, int(SEND_COOLDOWN - since_last))))
+        print('攒批中：%d 条待发（最早已等 %d 分钟，冷却剩 %d 分钟%s）'
+              % (len(pending), int(oldest_age), max(0, int(SEND_COOLDOWN - since_last)),
+                 '，重大新闻冷却剩 %d 分钟' % max(0, int(HIGH_COOLDOWN - since_last)) if has_high else ''))
         save_state(state)
         return
 
@@ -1020,6 +1019,32 @@ def save_state(state):
     os.replace(tmp, STATE_PATH)
 
 
+LOCK_PATH = os.path.join(BASE, 'radar.lock')
+
+
+def acquire_lock(max_age_s=4 * 3600):
+    """单实例锁：评估任务（跑 LLM 可能 1 小时+）与整点发送任务重叠时，
+    后来者直接退出，避免两边各读各的 state 造成双发。崩溃残留超 4h 自动抢占。"""
+    def _try():
+        fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        import atexit
+        atexit.register(lambda: os.path.exists(LOCK_PATH) and os.remove(LOCK_PATH))
+    try:
+        _try()
+        return True
+    except FileExistsError:
+        try:
+            if time.time() - os.path.getmtime(LOCK_PATH) > max_age_s:
+                os.remove(LOCK_PATH)
+                _try()
+                return True
+        except OSError:
+            pass
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description='AI-Radar')
     ap.add_argument('--dry-run', action='store_true', help='只抓取打印，不推送不写状态')
@@ -1036,6 +1061,11 @@ def main():
     ap.add_argument('--profile-suggest', action='store_true',
                     help='基于近 30 天 ★ 高相关记录起草更新版个人画像')
     args = ap.parse_args()
+
+    # 单实例锁：评估/发送/手动三路互斥，防重叠竞态双发
+    if not acquire_lock():
+        print('另一个 radar 实例正在运行（radar.lock 存在），本次退出。')
+        sys.exit(0)
 
     if args.test:
         ok = push('🤖 AI-Radar 通道测试', '通道正常！接下来 AI 大厂的新动态会出现在这里。')
@@ -1206,13 +1236,7 @@ def main():
     save_state(state)
 
     if args.eval_only:
-        has_high = any((p.get('influence') or 0) >= HIGH_INFLUENCE for p in pending)
-        if has_high:
-            print('检测到重大新闻（影响力≥%d）：突破窗口立即推送' % HIGH_INFLUENCE)
-            flush_pending(state, force=False, slot=False)
-        else:
-            print('评估完成：%d 条在池，等待发送窗口。' % len(pending))
-            save_state(state)
+        flush_pending(state, force=False, slot=False)   # 内部自判：重大新闻走 HIGH_COOLDOWN，其余攒批
         return
 
     flush_pending(state, force=bool(args.send_now), slot=False)

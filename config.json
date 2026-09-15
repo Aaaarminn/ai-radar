@@ -8,6 +8,7 @@
   "max_per_email": 12,
   "summary_limit": 8,
   "send_cooldown_minutes": 720,
+  "high_cooldown_minutes": 180,
   "old_cutoff_days": 7,
   "summary_mode": "auto",
   "summary_language": "中文"
