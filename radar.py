@@ -776,9 +776,18 @@ def summarize(title, text):
                 title_cn = _strip_meta(t2.splitlines()[0])[:120]
         return title_cn, influence, _sent_cut(summary, 220), relevant, full_text[:2000]
     if text:
+        if not _has_cjk(text):
+            # 英文原文兜底会产出"裸英文条目"：留空摘要，交给发送端下周期用 LLM 补译
+            return None, None, '', False, ''
         sents = re.split(r'(?<=[。！？!?])', text)[:3]
         return None, None, _sent_cut(''.join(sents), 200), False, text[:1500]
     return None, None, '', False, ''
+
+
+def _readable(it):
+    """语言门禁：标题/中文标题/摘要任一含中文即可上船"""
+    return (_has_cjk(it.get('title') or '') or _has_cjk(it.get('title_cn') or '')
+            or _has_cjk(it.get('summary') or ''))
 
 
 # ---------------------------------------------------------------- 主题聚类（同一事件多条报道 -> 一条）
@@ -967,21 +976,37 @@ def flush_pending(state, force=False, slot=False):
 
     chosen = cluster_items(pending)
     for it in chosen[:SUMMARY_LIMIT]:
-        if not it.get('summary'):        # 老池子条目补评估
+        if not _readable(it):            # 无中文（含英文兜底摘要的旧条目）-> LLM 重译
             art = fetch_article(it['link'])
             (it['title_cn'], it['influence'],
              it['summary'], it['relevant'], it['full_text']) = summarize(it['title'], art)
 
-    subject = '🤖 AI 雷达：%d 条动态' % len(chosen)
-    if len(pending) > len(chosen):
+    # ---- 语言门禁：无中文条目不上船，留池等下周期补译（3 次后放弃） ----
+    ship = [it for it in chosen if _readable(it)]
+    held = []
+    for it in chosen:
+        if not _readable(it):
+            it['_en_retry'] = it.get('_en_retry', 0) + 1
+            if it['_en_retry'] < 3:
+                held.append(it)
+    if held:
+        print('语言门禁：拦下 %d 条未翻译条目，留池重试。' % len(held))
+    if not ship:
+        print('本批 %d 条均未完成翻译，本次不发。' % len(chosen))
+        state['pending'] = pending
+        save_state(state)
+        return
+
+    subject = '🤖 AI 雷达：%d 条动态' % len(ship)
+    if len(pending) > len(ship):
         subject += '（聚合自 %d 条报道）' % len(pending)
-    ok = push(subject, chosen)
+    ok = push(subject, ship)
     if ok:
-        _append_sent(chosen, now_ms)
-        state['pending'] = []
+        _append_sent(ship, now_ms)
+        state['pending'] = held
         state['last_sent'] = now_ms
         save_state(state)
-        print('已推送 %d 条（聚合自 %d 条）。' % (len(chosen), len(pending)))
+        print('已推送 %d 条（聚合自 %d 条）。' % (len(ship), len(pending)))
     else:
         save_state(state)
         print('推送失败：待发池保留，下次运行自动重试。')
