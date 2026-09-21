@@ -78,6 +78,7 @@ BATCH_MIN_ITEMS = int(CFG.get('batch_min_items', 6))  # 攒够 N 条发一封
 BATCH_MAX_AGE = int(CFG.get('batch_max_age_minutes', 300))  # 或最早一条已等 N 分钟
 MAX_PER_EMAIL = int(CFG.get('max_per_email', 12))   # 单封邮件（聚类后）最多条数
 SUMMARY_LIMIT = int(CFG.get('summary_limit', 8))    # 单封最多摘要条数
+EMAIL_COMPILE_LIMIT = int(CFG.get('email_compile_limit', 600))  # 邮件内编译稿截断长度（0=不截断；QQ 邮箱不支持 <details> 折叠，防长墙平铺）
 OLD_CUTOFF_DAYS = int(CFG.get('old_cutoff_days', 7))
 
 
@@ -464,8 +465,16 @@ def build_html(title, items):
                              'padding:10px 12px;border-radius:0 6px 6px 0;">%s</div>' % lines)
             # 详细编译：默认折叠，点"展开正文"按钮显示（<details> 纯 HTML，无 JS）
             if it.get('full_text'):
+                ft = it['full_text']
+                _trunc = False
+                if EMAIL_COMPILE_LIMIT and len(ft) > EMAIL_COMPILE_LIMIT:
+                    cut = ft[:EMAIL_COMPILE_LIMIT]
+                    if '。' in cut:
+                        cut = cut[:cut.rfind('。') + 1]  # 按句边界截
+                    ft = cut + '……'
+                    _trunc = True
                 body = []
-                for para in it['full_text'].split('\n'):
+                for para in ft.split('\n'):
                     p = para.strip()
                     if len(p) > 2:
                         if p.startswith('【'):
@@ -476,6 +485,10 @@ def build_html(title, items):
                         else:
                             body.append('<div style="font-size:13px;color:#2c3640;line-height:1.8;'
                                         'margin:4px 0 0 0;">%s</div>' % _esc(p))
+                if _trunc:
+                    body.append('<div style="font-size:11px;color:#8a95a1;margin-top:6px;">'
+                                '〔编译全文 %d 字，邮件内截断；完整背景见下方原文链接〕</div>'
+                                % len(it['full_text']))
                 if body:
                     parts.append('<details style="margin-top:10px;">'
                                  '<summary style="display:inline-block;background:#eef4fb;'
@@ -1024,7 +1037,8 @@ def _append_sent(items, now_ms):
     log.append({'ts': now_ms, 'items': [
         {'t': it.get('title_cn') or it['title'], 'g': it.get('group', ''),
          'inf': it.get('influence'), 'rel': bool(it.get('relevant')),
-         's': (it.get('summary') or '')[:140], 'l': it.get('link', '')}
+         's': (it.get('summary') or '')[:140], 'l': it.get('link', ''),
+         'f': (it.get('full_text') or '')[:2000]}
         for it in items]})
     log = log[-200:]
     tmp = SENT_LOG_PATH + '.tmp'
