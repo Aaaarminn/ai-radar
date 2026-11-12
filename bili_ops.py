@@ -368,8 +368,9 @@ def _num(v):
 
 
 def _load_audit_counts():
-    """bili_audit.jsonl -> {date: {action: n}}。skip_* 归并为一类 skip,
-    便于日报展示"被审核拦下"的量。"""
+    """bili_audit.jsonl -> {date: {action: n}}。skip_* 与评论通道的
+    comment_skip/comment_drop/comment_budget_block 归并为一类 skip,便于
+    日报展示"被审核拦下"的量(t5 遗留修复:评论管线 action 原不落被拦列)。"""
     per_day = {}
     try:
         with open(AUDIT, encoding='utf-8') as f:
@@ -383,7 +384,8 @@ def _load_audit_counts():
                     continue
                 day = str(rec.get('ts') or '')[:10]
                 act = str(rec.get('action') or '?')
-                if act.startswith('skip_'):
+                if act.startswith('skip_') or act in (
+                        'comment_skip', 'comment_drop', 'comment_budget_block'):
                     act = 'skip'
                 d = per_day.setdefault(day, {})
                 d[act] = d.get(act, 0) + 1
