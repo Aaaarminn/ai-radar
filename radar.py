@@ -226,7 +226,7 @@ def _sec(env_name):
     if v:
         return v
     try:
-        with open(os.path.join(BASE, 'secrets.local.json'), encoding='utf-8') as f:
+        with open(os.path.join(BASE, 'secrets.local.json'), encoding='utf-8-sig') as f:
             return str(json.load(f).get(env_name.lower(), '') or '')
     except Exception:  # noqa: BLE001
         return ''
@@ -276,7 +276,8 @@ def push_wxpusher(token, uid, title, content):
 
 
 def push_smtp(cfg, title, items, footer=None):
-    """邮件通道：HTML 卡片排版 + 纯文本降级；多收件人；测试消息只发首个"""
+    """邮件通道：HTML 卡片排版 + 纯文本降级；多收件人；测试消息只发首个。
+    footer 可为纯文本，或 (纯文本, html) 二元组——html 部分原样插入(如B站 mailto 按钮)。"""
     import smtplib
     from email.header import Header
     from email.mime.multipart import MIMEMultipart
@@ -287,10 +288,17 @@ def push_smtp(cfg, title, items, footer=None):
         html, plain = '<pre style="font-family:sans-serif;">%s</pre>' % _esc(items), items
     else:
         html, plain = build_html(title, items), build_plain(items)
+    footer_html_part = None
     if footer:
+        if isinstance(footer, tuple):
+            footer, footer_html_part = footer[0], footer[1]
         plain += '\n\n' + footer
-        html += ('<div style="margin-top:18px;padding-top:12px;border-top:1px solid #ddd;'
-                 'color:#555;">%s</div>') % _esc(footer).replace('\n', '<br>')
+        if footer_html_part:
+            html += ('<div style="margin-top:18px;padding-top:12px;border-top:1px solid #ddd;'
+                     'color:#555;">%s</div>') % footer_html_part
+        else:
+            html += ('<div style="margin-top:18px;padding-top:12px;border-top:1px solid #ddd;'
+                     'color:#555;">%s</div>') % _esc(footer).replace('\n', '<br>')
     msg = MIMEMultipart('alternative')
     msg['Subject'] = Header(title, 'utf-8')
     msg['From'] = cfg['user']
@@ -317,17 +325,18 @@ def push(title, items, footer=None):
     footer：附加文本（B站候选区等），邮件加正文末尾，Markdown 通道直接拼接。
     配置来源：环境变量 或 secrets.local.json（适配计划任务等无环境变量场景）"""
     try:
+        footer_txt = footer[0] if isinstance(footer, tuple) else footer   # markdown 通道只拼纯文本
         if _sec('WECOM_WEBHOOK'):
             print('[push] 通道: wecom')
             c = items if isinstance(items, str) else build_markdown(items)
-            if footer:
-                c += '\n\n' + footer
+            if footer_txt:
+                c += '\n\n' + footer_txt
             return push_wecom(_sec('WECOM_WEBHOOK'), title, c)
         if _sec('SERVERCHAN_KEY'):
             print('[push] 通道: serverchan')
             c = items if isinstance(items, str) else build_markdown(items)
-            if footer:
-                c += '\n\n' + footer
+            if footer_txt:
+                c += '\n\n' + footer_txt
             return push_serverchan(_sec('SERVERCHAN_KEY'), title, c)
         smtp = {'host': _sec('SMTP_HOST'), 'port': _sec('SMTP_PORT') or '465',
                 'user': _sec('SMTP_USER'), 'pass': _sec('SMTP_PASS'),
@@ -1000,13 +1009,16 @@ def _bili_today_count(state):
 
 def _bili_prepare(state, ship):
     """从本批上船条目里挑影响最高的 N 条作为 B站动态候选。
-    返回 (邮件 footer 文案, 候选列表)；今日额度已满则返回 (None, [])。"""
+    返回 (邮件 footer 纯文本, footer HTML, 候选列表)；
+    今日额度已满或无候选时返回 (None, None, [])。
+    HTML 部分每条候选一枚 mailto 按钮——手机 QQ 邮箱 APP 点按钮拉起
+    预填邮件(收件人=雷达发件箱,主题/正文=「发 N」),再点一次发送即可。"""
     if not BILI_ENABLED or not ship:
-        return None, []
+        return None, None, []
     if _bili_today_count(state) >= BILI_MAX_PER_DAY:
         print('[bili] 今日发布额度已用完（%d/%d），邮件不附候选。'
               % (_bili_today_count(state), BILI_MAX_PER_DAY))
-        return None, []
+        return None, None, []
     ranked = sorted(ship, key=lambda p: (p.get('influence') or 0,
                                          p.get('score') or 0), reverse=True)
     drafts = []
@@ -1017,12 +1029,28 @@ def _bili_prepare(state, ship):
                        'full_text': p.get('full_text') or '',
                        'link': p.get('link') or '', '_ts': p.get('_ts') or 0,
                        'influence': p.get('influence'), 'score': p.get('score')})
-    lines = ['📮 B站动态候选（回复本邮件「发 N」即发布该条全文编译稿到B站动态，每日限%d条）：'
+    lines = ['📮 B站动态候选（点下方按钮→发送，即发布该条全文编译稿到B站动态，每日限%d条）：'
              % BILI_MAX_PER_DAY]
+    btns = []
+    from_addr = _sec('SMTP_USER') or ''
     for d in drafts:
         sc = d.get('influence') or d.get('score') or '?'
-        lines.append('%d.【%s】%s' % (d['n'], sc, d.get('title_cn') or d.get('title')))
-    return '\n'.join(lines), drafts
+        label = '%d.【%s】%s' % (d['n'], sc, d.get('title_cn') or d.get('title'))
+        lines.append(label)
+        if from_addr:
+            import urllib.parse
+            cmd = '发 %d' % d['n']
+            href = 'mailto:%s?subject=%s&body=%s' % (
+                from_addr, urllib.parse.quote(cmd), urllib.parse.quote(cmd))
+            btns.append(
+                '<div style="margin:6px 0;"><a href="%s" '
+                'style="display:inline-block;background:#fb7299;color:#ffffff;'
+                'padding:10px 16px;border-radius:6px;text-decoration:none;'
+                'font-weight:bold;font-size:14px;">📌 发布 %s</a></div>'
+                % (_esc(href), _esc(label[:48])))
+    footer_plain = '\n'.join(lines)
+    footer_html = ('<div style="margin-top:6px;">%s</div>' % '<br>'.join(btns)) if btns else None
+    return footer_plain, footer_html, drafts
 
 
 def _imap_reply_texts(imap, to_addr):
@@ -1083,7 +1111,8 @@ def bili_check_replies(state):
         imap.login(user, pw)
         imap.select('INBOX')
         for num, subj, body in _imap_reply_texts(imap, to_addr):
-            m = re.search(r'发\s*([0-9]+)', body[:300] or '')   # 指令须出现在回复开头
+            m = (re.search(r'发\s*([0-9]+)', subj or '')
+                 or re.search(r'发\s*([0-9]+)', body[:300] or ''))   # mailto 按钮的指令在主题里,手打回复在正文里
             if not m:
                 continue                                        # 普通回复不动
             imap.store(num, '+FLAGS', '\\Seen')                 # 处理过即标已读
@@ -1180,8 +1209,8 @@ def flush_pending(state, force=False, slot=False):
     subject = '🤖 AI 雷达：%d 条动态' % len(ship)
     if len(pending) > len(ship):
         subject += '（聚合自 %d 条报道）' % len(pending)
-    bili_footer, bili_drafts = _bili_prepare(state, ship)
-    ok = push(subject, ship, footer=bili_footer)
+    bili_footer, bili_footer_html, bili_drafts = _bili_prepare(state, ship)
+    ok = push(subject, ship, footer=(bili_footer, bili_footer_html) if bili_footer else None)
     if ok:
         _append_sent(ship, now_ms)
         state['pending'] = held
