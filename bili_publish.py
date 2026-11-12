@@ -85,14 +85,14 @@ def _load_json(path, default):
 
 
 def _build_text(d, tags):
-    """候选条目 -> 动态全文(标题 + 全量编译稿 + 原文链接 + 标签)"""
+    """候选条目 -> 动态全文(标题 + 全量编译稿 + 原文链接;tags 为空则不拼标签)"""
     title = d.get('title_cn') or d.get('title') or '(无标题)'
     body = (d.get('full_text') or '').strip()
     if not body:
         body = (d.get('summary') or '').strip()
     if not body:
         body = '(编译稿缺失)'
-    parts = ['【AI快讯】' + title, '', body, '', '原文: ' + (d.get('link') or '')]
+    parts = [title, '', body, '', '原文: ' + (d.get('link') or '')]
     if tags:
         parts += ['', tags]
     text = '\n'.join(parts)
