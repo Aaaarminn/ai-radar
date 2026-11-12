@@ -1137,6 +1137,8 @@ def flush_pending(state, force=False, slot=False):
         print('攒批中：%d 条待发（最早已等 %d 分钟，冷却剩 %d 分钟%s）'
               % (len(pending), int(oldest_age), max(0, int(SEND_COOLDOWN - since_last)),
                  '，重大新闻冷却剩 %d 分钟' % max(0, int(HIGH_COOLDOWN - since_last)) if has_high else ''))
+        # B站选题独立于邮件攒批节奏：攒批窗口同样尝试自动发布（用户授权全自动运营）
+        _bili_auto_publish(state, pending)
         save_state(state)
         return
 

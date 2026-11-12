@@ -32,8 +32,9 @@ except Exception:
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(BASE, 'state.json')
 
-# 长文本动态安全上限:B站动态正文极长会被截断,6000 字内稳妥
-MAX_DYN_CHARS = 6000
+# 长文本动态安全上限:B站纯文本动态实测上限约 1000 字符(4126115 文字太长),
+# 留出标题/链接余量取 950,超出尾部截断并附说明。
+MAX_DYN_CHARS = 950
 
 # 本机 NO_PROXY 含裸 IPv6 字面量(::1/[::1])会引爆 httpx 的代理解析
 # (InvalidURL: Invalid port ':1]'),调 bili.exe 一律传干净环境。
