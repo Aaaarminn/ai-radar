@@ -85,9 +85,11 @@ def _load_json(path, default):
         return default
 
 
-def _claude_cli(prompt, timeout=120):
+def _claude_cli(prompt, timeout=200):
     """调本机 claude CLI(公司网关只放行 CLI);失败返回 ''。
 
+    timeout=200:2026-11-12 晚实测 6 压缩用例 10/12 次 120s 超时(网关慢),
+    t8 建议 180~240s,取 200;超长稿压缩仍在 radar 侧总超时 420s 内。
     prompt 必须走 stdin(-p 不带值时 claude 从 stdin 读)。
     必须直调 claude.exe:经 claude.ps1 时其 "$input |" 管道在 PS 5.1 下
     按 ANSI 代码页重编码 stdin,中文全变 '?',模型只收到问号(2026-11-12
@@ -108,14 +110,16 @@ def _claude_cli(prompt, timeout=120):
         return ''
 
 
-_SHRINK_BAD_RE = re.compile(
-    r'API Error[:：]|不安全或敏感内容|\uFFFD|[\uE000-\uF8FF]|[\x00-\x08\x0b\x0c\x0e-\x1f]'
-    r'|为您|帮你|作为一个AI|作为一名AI|仅供参考|希望这(?:篇|条|份|能)|祝你'
-    r'|(?:^|\n)\s*(?:以下是|好的[,，!！.。]|当然[,，!！])'
-    # LLM 元对话(如"编译稿没有传完整——我这边只收到了开头一句"):新闻正文绝不该出现
-    r'|编译稿|传(?:得)?完整|只收到|我这边|补写|编造|没法凭|无法凭|请提供|请把|贴给我'
-    r'|两个建议|建议(?:如下|一|二)|未收到|收到(?:的|了)?(?:开头|半截|部分)'
-    r'|我(?:无法|没法|不能)(?:凭|确认|完成)')
+# 统一审核入口(t9,2026-11-12):乱码/助手腔/元对话粗筛正则(原 _SHRINK_BAD_RE,
+# commit 63848bc)移至 bili_ops 的分层 guard(garbled|assistant|meta,即
+# BAD_TEXT_RE,已含原 _quality_guard 独有的 claude-code 标记),与 reply/comment
+# 双通道共用,规则清单见 docs/guard-rules.md。bili_ops 顶层 import 本模块,
+# 此处须函数内懒加载避免循环 import;import 失败即抛错中断发布——审核 fail
+# closed,绝不静默绕过。
+def _guard(text, channel='shrink'):
+    """统一文本审核懒加载入口:透传 bili_ops.guard_text,返回 (ok, code, hit)。"""
+    from bili_ops import guard_text
+    return guard_text(text, channel)
 
 # 提示词(2026-11-12 t8 调优):把"守字数/完整收尾"列为硬性要求并解释后果,
 # 引导 LLM 用删段落而不是压句子来守预算,保住数字/人名/机构/时间线等信息密度。
@@ -143,8 +147,9 @@ def _ends_badly(t):
 
 
 def _shrink_ok(out, limit):
-    """压缩稿合格判定:无异常文本、不超预算、完整收尾、中文占比达标。"""
-    if not out or _SHRINK_BAD_RE.search(out):
+    """压缩稿合格判定:无异常文本、不超预算、完整收尾、中文占比达标。
+    异常文本粗筛走统一 guard(t9,= 旧 _SHRINK_BAD_RE 覆盖面 + claude-code)。"""
+    if not out or not _guard(out)[0]:
         return False
     t = out.strip()
     if len(t) > limit or _ends_badly(t):
@@ -252,19 +257,9 @@ def _quality_guard(text):
     """发布前最后一道审核(与 radar.py _dyn_publishable 同规则的独立实现,双保险):
     拦乱码(替换符/PUA/控制字符)、错误/审查文本、助手腔,以及中文占比<60% 或
     正文<200 字(英文正文未译/内容单薄)。不通过 exit 4。"""
-    bad = re.compile(
-        r'API Error[:：]|不安全或敏感内容'
-        r'|\uFFFD|[\uE000-\uF8FF]'
-        r'|[\x00-\x08\x0b\x0c\x0e-\x1f]'
-        r'|为您|帮你|作为一个AI|作为一名AI|仅供参考|希望这(?:篇|条|份|能)|祝你'
-        r'|(?:^|\n)\s*(?:以下是|好的[,，!！.。]|当然[,，!！])'
-        # LLM 元对话/工具自述("编译稿没有传完整""我这边只收到…"):新闻正文绝不该出现
-        r'|编译稿|传(?:得)?完整|只收到|我这边|补写|编造|没法凭|无法凭|请提供|请把|贴给我'
-        r'|两个建议|建议(?:如下|一|二)|未收到|收到(?:的|了)?(?:开头|半截|部分)'
-        r'|我(?:无法|没法|不能)(?:凭|确认|完成)'
-        r'|claude-code:|\[claude-code')
-    if bad.search(text):
-        print('质量审核未通过: 检测到乱码/错误文本/助手腔')
+    bad = _guard(text, 'dynamic')     # 统一粗筛(t9)= 旧内联正则 + claude-code 标记
+    if not bad[0]:
+        print('质量审核未通过: 检测到乱码/错误文本/助手腔(%s: %s)' % (bad[1], bad[2]))
         sys.exit(4)
     body = text.split('\n原文:')[0]           # 去掉尾部链接/标签,只审正文
     cjk = len(re.findall(r'[\u4e00-\u9fff]', body))

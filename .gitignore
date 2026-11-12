@@ -8,3 +8,15 @@ state.json
 send-now.log
 sent_log.json
 digest_*.md
+
+# B站运营运行时产物(不入库)
+bili_audit.jsonl
+bili_dm_state.json
+comment_state.json
+metrics/
+studies/
+article_drafts/
+.playwright-mcp/
+bili_login_debug.json
+bili_qrcode.png
+
