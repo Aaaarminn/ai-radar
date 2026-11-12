@@ -15,7 +15,7 @@
   "summary_mode": "auto",
   "summary_language": "中文",
   "bili_enabled": true,
-  "bili_draft_candidates": 3,
   "bili_max_per_day": 1,
-  "bili_tags": "#AI日报# #人工智能#"
+  "bili_tags": "#AI日报# #人工智能#",
+  "bili_min_influence": 8
 }

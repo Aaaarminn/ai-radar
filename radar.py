@@ -83,8 +83,8 @@ OLD_CUTOFF_DAYS = int(CFG.get('old_cutoff_days', 7))
 
 # ---- B站动态发布（邮件回复挑选制）：候选附于邮件末尾，回复「发 N」即发布全文编译稿 ----
 BILI_ENABLED = bool(CFG.get('bili_enabled', True))
-BILI_DRAFT_CANDIDATES = int(CFG.get('bili_draft_candidates', 3))  # 每封邮件附 N 条候选
 BILI_MAX_PER_DAY = int(CFG.get('bili_max_per_day', 1))            # 每日发布上限（低频试运行）
+BILI_MIN_INFLUENCE = int(CFG.get('bili_min_influence', 8))        # 自动选题门槛：影响力达到才上B站
 
 
 # ---------------------------------------------------------------- 抓取与解析
@@ -1007,145 +1007,70 @@ def _bili_today_count(state):
     return sum(1 for x in (state.get('bili_sent') or []) if x.get('d') == today)
 
 
-def _bili_prepare(state, ship):
-    """从本批上船条目里挑影响最高的 N 条作为 B站动态候选。
-    返回 (邮件 footer 纯文本, footer HTML, 候选列表)；
-    今日额度已满或无候选时返回 (None, None, [])。
-    HTML 部分每条候选一枚 mailto 按钮——手机 QQ 邮箱 APP 点按钮拉起
-    预填邮件(收件人=雷达发件箱,主题/正文=「发 N」),再点一次发送即可。"""
+def _bili_auto_publish(state, ship):
+    """全自动选题发布：从本批上船条目里挑一条最适合B站的，直接发动态（用户已授权全自动）。
+    选题规则：今日额度未满 + 影响力>=BILI_MIN_INFLUENCE + score>=MIN_SCORE
+    + 上船门禁(_shippable) + 有中文标题 + 近200条B站记录未发过，取影响力最高者。
+    发布走 py -3.12 bili_publish.py 子进程（借 state['bili_drafts'] 传内容，子进程不写 state）。
+    返回邮件 footer (plain, html)（发布通知），未发布/失败返回 None（失败仅记日志）。"""
     if not BILI_ENABLED or not ship:
-        return None, None, []
-    if _bili_today_count(state) >= BILI_MAX_PER_DAY:
-        print('[bili] 今日发布额度已用完（%d/%d），邮件不附候选。'
-              % (_bili_today_count(state), BILI_MAX_PER_DAY))
-        return None, None, []
-    ranked = sorted(ship, key=lambda p: (p.get('influence') or 0,
-                                         p.get('score') or 0), reverse=True)
-    drafts = []
-    for i, p in enumerate(ranked[:BILI_DRAFT_CANDIDATES]):
-        drafts.append({'n': i + 1, 'title': p.get('title') or '',
-                       'title_cn': p.get('title_cn') or '',
-                       'summary': p.get('summary') or '',
-                       'full_text': p.get('full_text') or '',
-                       'link': p.get('link') or '', '_ts': p.get('_ts') or 0,
-                       'influence': p.get('influence'), 'score': p.get('score')})
-    lines = ['📮 B站动态候选（点下方按钮→发送，即发布该条全文编译稿到B站动态，每日限%d条）：'
-             % BILI_MAX_PER_DAY]
-    btns = []
-    from_addr = _sec('SMTP_USER') or ''
-    for d in drafts:
-        sc = d.get('influence') or d.get('score') or '?'
-        label = '%d.【%s】%s' % (d['n'], sc, d.get('title_cn') or d.get('title'))
-        lines.append(label)
-        if from_addr:
-            import urllib.parse
-            cmd = '发 %d' % d['n']
-            href = 'mailto:%s?subject=%s&body=%s' % (
-                from_addr, urllib.parse.quote(cmd), urllib.parse.quote(cmd))
-            btns.append(
-                '<div style="margin:6px 0;"><a href="%s" '
-                'style="display:inline-block;background:#fb7299;color:#ffffff;'
-                'padding:10px 16px;border-radius:6px;text-decoration:none;'
-                'font-weight:bold;font-size:14px;">📌 发布 %s</a></div>'
-                % (_esc(href), _esc(label[:48])))
-    footer_plain = '\n'.join(lines)
-    footer_html = ('<div style="margin-top:6px;">%s</div>' % '<br>'.join(btns)) if btns else None
-    return footer_plain, footer_html, drafts
-
-
-def _imap_reply_texts(imap, to_addr):
-    """拉取收件箱中来自收件邮箱(to_addr)的未读邮件正文文本"""
-    import email
-    from email.header import decode_header
-    texts = []
-    typ, data = imap.search(None, '(UNSEEN FROM "%s")' % to_addr.replace('"', ''))
-    if typ != 'OK' or not data or not data[0]:
-        return texts
-    for num in data[0].split()[-20:]:        # 只看最近 20 封
-        typ, msg_data = imap.fetch(num, '(RFC822)')
-        if typ != 'OK' or not msg_data or not msg_data[0]:
-            continue
-        raw = msg_data[0][1]
-        msg = email.message_from_bytes(raw)
-        subj = ''
-        try:
-            parts = decode_header(msg.get('Subject') or '')
-            subj = ''.join(p.decode(cs or 'utf-8', 'replace') if isinstance(p, bytes) else p
-                           for p, cs in parts)
-        except Exception:  # noqa: BLE001
-            pass
-        body, html = '', ''
-        for part in msg.walk():
-            ct = part.get_content_type()
-            if ct not in ('text/plain', 'text/html') or part.get('Content-Disposition'):
-                continue
-            payload = part.get_payload(decode=True)
-            if payload is None:
-                continue
-            txt = payload.decode(part.get_content_charset() or 'utf-8', 'replace')
-            if ct == 'text/plain' and not body:
-                body = txt
-            elif ct == 'text/html' and not html:
-                html = txt
-        if not body and html:
-            body = re.sub(r'<[^>]+>', ' ', html)     # 纯 HTML 回复去标签
-        texts.append((num, subj, body))
-    return texts
-
-
-def bili_check_replies(state):
-    """收件箱检查用户回复「发 N」→ 调 Python3.12 子进程发布对应候选动态。
-    由发送窗口（--send-only）在 flush_pending 之前调用。子进程只负责发动态，
-    草稿移除与 bili_sent 记录由本函数统一写 state（避免子进程写文件被 save_state 覆盖）。"""
-    if not BILI_ENABLED:
-        return
-    drafts = state.get('bili_drafts') or []
-    user, pw = _sec('SMTP_USER'), _sec('SMTP_PASS')
-    to_addr = str(_sec('SMTP_TO') or '').split(',')[0].strip()
-    if not (user and pw and to_addr):
-        return
-    imap = None
+        return None
+    today_n = _bili_today_count(state)
+    if today_n >= BILI_MAX_PER_DAY:
+        print('[bili] 今日发布额度已用完（%d/%d），跳过自动发布。' % (today_n, BILI_MAX_PER_DAY))
+        return None
+    sent_keys = set((x.get('title') or '') for x in (state.get('bili_sent') or [])[-200:])
+    pool = [p for p in ship
+            if (p.get('influence') or 0) >= BILI_MIN_INFLUENCE
+            and (p.get('score') or 0) >= MIN_SCORE
+            and _shippable(p)
+            and (p.get('title_cn') or '')
+            and (p.get('title_cn') or p.get('title') or '') not in sent_keys]
+    if not pool:
+        print('[bili] 本批无影响力>=%d 的合格条目，不发布B站动态。' % BILI_MIN_INFLUENCE)
+        return None
+    pool.sort(key=lambda p: (p.get('influence') or 0, p.get('score') or 0), reverse=True)
+    p = pool[0]
+    title = p.get('title_cn') or p.get('title') or ''
+    print('[bili] 自动选题：《%s》（影响%s）' % (title[:40], p.get('influence')))
+    # 借 bili_drafts 管道把选中条目交给子进程
+    state['bili_drafts'] = [{'n': 1, 'title': p.get('title') or '',
+                             'title_cn': p.get('title_cn') or '',
+                             'summary': p.get('summary') or '',
+                             'full_text': p.get('full_text') or '',
+                             'link': p.get('link') or '', '_ts': p.get('_ts') or 0,
+                             'influence': p.get('influence'), 'score': p.get('score')}]
+    save_state(state)                        # 子进程从磁盘读 drafts
+    script = os.path.join(BASE, 'bili_publish.py')
     try:
-        import imaplib
-        imap = imaplib.IMAP4_SSL('imap.qq.com', 993)
-        imap.login(user, pw)
-        imap.select('INBOX')
-        for num, subj, body in _imap_reply_texts(imap, to_addr):
-            m = (re.search(r'发\s*([0-9]+)', subj or '')
-                 or re.search(r'发\s*([0-9]+)', body[:300] or ''))   # mailto 按钮的指令在主题里,手打回复在正文里
-            if not m:
-                continue                                        # 普通回复不动
-            imap.store(num, '+FLAGS', '\\Seen')                 # 处理过即标已读
-            n = int(m.group(1))
-            d = next((x for x in drafts if x.get('n') == n), None)
-            if d is None:
-                print('[bili] 回复「发 %d」：候选不存在或已被发布，忽略。' % n)
-                continue
-            if _bili_today_count(state) >= BILI_MAX_PER_DAY:
-                print('[bili] 回复「发 %d」：今日额度已满，忽略。' % n)
-                continue
-            script = os.path.join(BASE, 'bili_publish.py')
-            r = subprocess.run(['py', '-3.12', script, 'send', str(n)],
-                               capture_output=True, timeout=180)
-            out = ((r.stdout or b'') + (r.stderr or b'')).decode('utf-8', 'replace')
-            print('[bili] 发布候选 %d -> exit=%d\n%s' % (n, r.returncode, out.strip()[-500:]))
-            if r.returncode == 0:
-                state['bili_sent'] = (state.get('bili_sent') or [])[-200:] + [{
-                    'd': time.strftime('%Y-%m-%d'),
-                    'ts': time.strftime('%Y-%m-%d %H:%M'), 'n': n,
-                    'title': d.get('title_cn') or d.get('title'), 'link': d.get('link')}]
-                state['bili_drafts'] = [x for x in drafts if x.get('n') != n]
-                save_state(state)
-                print('[bili] 已发布第 %d 条候选，剩余候选 %d。'
-                      % (n, len(state['bili_drafts'])))
+        r = subprocess.run(['py', '-3.12', script, 'send', '1'],
+                           capture_output=True, timeout=180)
+        out = ((r.stdout or b'') + (r.stderr or b'')).decode('utf-8', 'replace')
     except Exception as e:  # noqa: BLE001
-        print('[bili] 回复检查失败（不影响邮件主链路）:', e)
-    finally:
-        try:
-            if imap is not None:
-                imap.logout()
-        except Exception:  # noqa: BLE001
-            pass
+        print('[bili] 自动发布异常（不影响邮件主链路）:', e)
+        state['bili_drafts'] = []
+        save_state(state)
+        return None
+    state['bili_drafts'] = []                # 单次管道用完即清
+    if r.returncode == 0:
+        m = re.search(r'dyn_url=(\S+)', out)
+        dyn_url = m.group(1) if m else ''
+        state['bili_sent'] = (state.get('bili_sent') or [])[-200:] + [{
+            'd': time.strftime('%Y-%m-%d'),
+            'ts': time.strftime('%Y-%m-%d %H:%M'), 'n': 1,
+            'title': title, 'link': p.get('link'), 'dyn_url': dyn_url}]
+        save_state(state)
+        print('[bili] 已发布B站动态：%s' % (dyn_url or title[:40]))
+        plain = '📮 今日已自动发布B站动态（%d/%d）：《%s》' % (
+            today_n + 1, BILI_MAX_PER_DAY, title)
+        html = ('<div style="margin-top:6px;padding:8px 12px;background:#fff1f4;'
+                'border-radius:6px;">📮 已自动发布B站动态：'
+                '<a href="%s" style="color:#fb7299;">《%s》</a></div>'
+                % (_esc(dyn_url) or '#', _esc(title[:40]))) if dyn_url else None
+        return (plain, html)
+    print('[bili] 自动发布失败(exit=%d)：%s' % (r.returncode, out.strip()[-300:]))
+    save_state(state)
+    return None
 
 
 def flush_pending(state, force=False, slot=False):
@@ -1209,17 +1134,16 @@ def flush_pending(state, force=False, slot=False):
     subject = '🤖 AI 雷达：%d 条动态' % len(ship)
     if len(pending) > len(ship):
         subject += '（聚合自 %d 条报道）' % len(pending)
-    bili_footer, bili_footer_html, bili_drafts = _bili_prepare(state, ship)
-    ok = push(subject, ship, footer=(bili_footer, bili_footer_html) if bili_footer else None)
+    bili_footer = _bili_auto_publish(state, ship)   # 全自动选题发布；footer=发布通知
+    ok = push(subject, ship, footer=bili_footer)
     if ok:
         _append_sent(ship, now_ms)
         state['pending'] = held
         state['last_sent'] = now_ms
-        state['bili_drafts'] = bili_drafts   # 新候选替换旧候选（用户只挑最新一批）
         save_state(state)
         print('已推送 %d 条（聚合自 %d 条）%s。' % (
             len(ship), len(pending),
-            ('，附 B站候选 %d 条' % len(bili_drafts)) if bili_drafts else ''))
+            '，B站已自动发布' if bili_footer else ''))
     else:
         save_state(state)
         print('推送失败：待发池保留，下次运行自动重试。')
@@ -1410,8 +1334,7 @@ def main():
 
     # ---- 发送窗口模式：跳过扫描，只处理待发池（配合定时任务整点触发） ----
     if args.send_only:
-        bili_check_replies(state)   # 先收「发 N」回复指令再发新邮件，避免新旧候选混淆
-        flush_pending(state, force=bool(args.send_now), slot=True)
+        flush_pending(state, force=bool(args.send_now), slot=True)   # B站自动选题在 flush_pending 内
         return
 
     with open(SOURCES_PATH, encoding='utf-8') as f:

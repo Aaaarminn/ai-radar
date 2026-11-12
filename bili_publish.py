@@ -155,7 +155,16 @@ def cmd_preview_send(n, do_send):
         except OSError:
             pass
     if payload and payload.get('ok'):
-        print('发布成功: %s' % json.dumps(payload.get('data'), ensure_ascii=False)[:200])
+        data = payload.get('data') or {}
+        dyn_id = ''
+        for k in ('id_str', 'dynamic_id', 'dyn_id', 'id'):
+            v = data.get(k)
+            if v:
+                dyn_id = str(v)
+                break
+        print('发布成功: %s' % json.dumps(data, ensure_ascii=False)[:200])
+        if dyn_id:
+            print('dyn_url=https://t.bilibili.com/%s' % dyn_id)
         return
     print('发布失败: %s' % out.strip()[:300])
     sys.exit(3)
