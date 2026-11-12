@@ -17,7 +17,10 @@
 
 用法:
   py -3.12 bili_ops.py inbox          处理未读:评论回复/@我 → LLM 起草 → 回复
-  py -3.12 bili_ops.py patrol         站内巡查:搜AI内容 → 适量点赞/关注
+  py -3.12 bili_ops.py patrol         站内巡查:搜AI内容(纯模型/工具词)→
+                                      top1-2『看懂再评论』链(bili_comment
+                                      patrol_pipeline,模式由 config
+                                      comment_mode 控制)→ 适量点赞/关注
   py -3.12 bili_ops.py report         运营日报:指标快照+动作量统计+明日建议
   py -3.12 bili_ops.py report --raw   日报之外附原始 JSON(排障用)
   py -3.12 bili_ops.py article        专栏草稿:最近一批已发条目汇编"AI 日报"(仅本地)
@@ -203,8 +206,23 @@ MAX_REPLIES_PER_RUN = 5
 MAX_LIKES_PER_RUN = 6          # 每天约 2 次 patrol,合计 <=12 赞/天,低频防风控
 MAX_FOLLOWS_PER_RUN = 1
 
-# 站内巡查关键词(轮换),AI 信息同步博主的内容领域
-PATROL_KEYWORDS = ['人工智能', 'AI 大模型', 'OpenAI', '英伟达', 'DeepSeek', 'Anthropic Claude']
+# 站内巡查关键词(轮换,纯模型/工具类词;t6 收窄):原表含「英伟达」,t11 实测
+# 经它搜到黄仁勋时政八卦视频并点了赞,与『时政不碰』人设有张力——公司/人物词
+# 撤出关键词表,时政八卦类标题另由 LIKE_SKIP_RE 兜底拦截。
+PATROL_KEYWORDS = ['人工智能', 'AI 大模型', 'OpenAI', 'Claude', 'Gemini',
+                   'DeepSeek', 'Anthropic', '大模型']
+
+# patrol 标题级硬过滤(t6):时政/八卦/热搜词与政企名人名一律跳过(赞与评论都不碰)。
+LIKE_SKIP_RE = re.compile(
+    r'时政|时局|时评|八卦|热搜|吃瓜|爆料|绯闻|开撕|互撕|黄仁勋|马斯克'
+    r'|特朗普|拜登|奥巴马|普京|泽连斯基')
+
+# patrol 领域白名单词(标题含其一才算 AI 垂直内容;gemini/anthropic 随关键词表补齐)
+LIKE_DOMAIN_WORDS = ('ai', '人工智能', '大模型', 'gpt', 'llm', 'deepseek', 'claude',
+                     'openai', 'gemini', 'anthropic', '英伟达', '智能体', 'aigc', 'agi')
+
+# patrol 评论链:每轮评分前 PATROL_COMMENT_TOP 名进 study→comment(t6)
+PATROL_COMMENT_TOP = 2
 
 # 回复起草人设(2026-11-12 t11 按 t3《comment-design.md》§4.2/§4.3 人设规范校准:
 # 资讯编辑口吻/真实信息增量/防提示注入/宁缺毋滥;旧版全文存档于 docs/reply-samples.md)
@@ -317,8 +335,40 @@ def _handle_feed(group, sub, limit):
     return done
 
 
+def _patrol_candidates(items):
+    """搜索条目 → patrol 候选(t6):标题去高亮标签 → LIKE_SKIP_RE 剔除(时政/
+    八卦/人名,审计 skip_like_filter 落日报"被拦"列)→ 领域词命中 → 评分排序
+    (领域词命中数多者优先,同分播放量高者先;确定性排序,不引额外依赖)。
+    返回 [{'bvid','title','views','kw_hits'}] 按评分降序。"""
+    rel = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        bvid = str(it.get('bvid') or '')
+        title = re.sub(r'<[^>]+>', '', str(it.get('title') or '')).strip()
+        if not bvid or not title:
+            continue
+        if LIKE_SKIP_RE.search(title):
+            _audit('skip_like_filter', {'bvid': bvid, 'title': title[:60]})
+            continue
+        t = title.lower()
+        hits = [k for k in LIKE_DOMAIN_WORDS if k in t]
+        if not hits:
+            continue
+        views = it.get('play')
+        views = int(views) if isinstance(views, (int, float)) else None
+        rel.append({'bvid': bvid, 'title': title, 'views': views,
+                    'kw_hits': len(hits)})
+    rel.sort(key=lambda c: (-c['kw_hits'], -(c['views'] or 0)))
+    return rel
+
+
 def cmd_patrol():
-    """站内巡查:轮换关键词搜AI视频,点赞相关度高的(预算内);累计关注<=1。"""
+    """站内巡查(t6 整合『看懂再评论』链):轮换关键词(纯模型/工具词)搜AI视频
+    → 标题级过滤(LIKE_SKIP_RE + 领域词) → 评分 top1-2 依次 study→comment
+    (bili_comment.patrol_pipeline:有 opportunities 且预算内才评,mode 取 config
+    comment_mode,off/dryrun 不发真评论)→ like;其余候选按 MAX_LIKES_PER_RUN
+    点赞。评论模块加载失败自动退化为纯点赞(老行为)。"""
     kw = PATROL_KEYWORDS[int(time.time() // 86400) % len(PATROL_KEYWORDS)]
     print('[ops] 巡查关键词: %s' % kw)
     rc, payload, out = _run_bili(['search', 'video', kw, '--size', '10'], timeout=60)
@@ -326,26 +376,55 @@ def cmd_patrol():
     if not items:
         print('[ops] 搜索失败或无结果: %s' % out.strip()[:150])
         sys.exit(3)
+    rel = _patrol_candidates(items)
+    if not rel:
+        print('[ops] 本轮无领域相关候选(标题过滤后为空)。')
+        return
+    print('[ops] 领域相关候选 %d 个,前 %d 名进评论链。' % (len(rel), PATROL_COMMENT_TOP))
+
+    bc = None                   # 懒加载:模块级 import 会成环(bili_comment import bili_ops)
+    try:
+        import bili_comment
+        bc = bili_comment
+    except Exception as e:
+        print('[ops] 评论模块加载失败,本轮退化为纯点赞: %s' % e)
+        _audit('patrol_comment_module_fail', {'err': str(e)[:120]})
+
     liked = 0
-    for it in items:
+    for idx, c in enumerate(rel):
         if liked >= MAX_LIKES_PER_RUN:
             break
-        bvid = it.get('bvid') or ''
-        title = it.get('title') or ''
-        if not bvid:
+        do_like = True
+        if bc is not None and idx < PATROL_COMMENT_TOP:
+            verdict, info = bc.patrol_pipeline(c)
+            _audit('patrol_comment', {'bvid': c['bvid'], 'verdict': verdict,
+                                      'title': c['title'][:60]})
+            print('[ops] 评论链 %s(%s) -> %s' % (c['bvid'], c['title'][:24], verdict))
+            if verdict == 'halt':
+                # 账号级硬停(设计 §8 兜底矩阵):立即停止本轮全部写动作,绝不
+                # 带着风控状态继续点赞;人工 resume 后下轮自动恢复。
+                print('[ops] 触发账号级硬停(rc=%s),本轮停止全部写动作。'
+                      % info.get('rc'))
+                return
+            if verdict == 'sensitive_or_offdomain':
+                # 内容实证敏感/非 AI 域(t11 教训:黄仁勋八卦):连赞都不点
+                print('[ops] 内容偏离人设(敏感/非AI域),跳过该视频点赞。')
+                do_like = False
+            elif verdict == 'off':
+                pass                            # 评论功能关闭:纯点赞模式(零成本)
+            else:
+                # 管道走完(posted/queued/dryrun/候选级放弃):与点赞保持保守间隔
+                time.sleep(10 if verdict in ('posted', 'queued', 'dryrun') else 2)
+        if not do_like:
             continue
-        # 只点赞标题含明确 AI 关键词的(垂直领域相关度)
-        t = title.lower()
-        if not any(k.lower() in t for k in ('ai', '人工智能', '大模型', 'gpt', 'llm',
-                                            'deepseek', 'claude', 'openai', '英伟达', '智能体')):
-            continue
-        rc2, p2, out2 = _run_bili(['video', 'like', bvid], timeout=60)
+        rc2, p2, out2 = _run_bili(['video', 'like', c['bvid']], timeout=60)
         ok = bool(p2 and p2.get('ok'))
-        _audit('like', {'bvid': bvid, 'title': title[:60], 'ok': ok})
-        print('[ops] 点赞 %s %s -> %s' % (bvid, title[:30], 'OK' if ok else 'FAIL'))
+        _audit('like', {'bvid': c['bvid'], 'title': c['title'][:60], 'ok': ok})
+        print('[ops] 点赞 %s %s -> %s' % (c['bvid'], c['title'][:30],
+                                          'OK' if ok else 'FAIL'))
         if ok:
             liked += 1
-        time.sleep(6)
+        time.sleep(6)                            # 动作间隔,降低风控风险
     print('[ops] 本轮点赞 %d 个。' % liked)
 
 

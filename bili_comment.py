@@ -33,6 +33,10 @@ discover 退出码: 0=有候选  10=无可评候选(宁缺毋滥,正常)
   py -3.12 bili_comment.py status                 预算/硬停状态/近10条评论记录
   py -3.12 bili_comment.py resume                 人工解除 captcha/硬停(先在浏览器完成同操作)
 
+patrol 评论链(t6 集成;bili_ops.cmd_patrol 懒加载 patrol_pipeline,评分 top1-2 候选):
+  现拉素材理解(study 同构留档)→起草→审核→按 comment_mode 出口(dryrun/review/auto)
+  →点赞;halt→patrol 停全部写动作,sensitive_or_offdomain→连点赞都跳过(时政不碰)。
+
 run/send 退出码: 0=发了1条(或 dryrun/review 出1条草稿)  10=无可评候选/功能关闭
   11=候选全被审核拦下(宁缺毋滥,正常)  12=预算/硬停拦下  3=未登录透传
   5/6/7=bili-cli 风控码透传(已硬停)  8=网络错误  1=用法错误
@@ -1179,8 +1183,149 @@ def _ctx_brief_for(bvid):
     return ctx, brief
 
 
+def _save_study_record(ctx, brief, why=''):
+    """管线内 study 留档(t6):与 cmd_study 同构落盘 studies/<bvid>.json——成功存
+    brief,放弃存 skip 原因,供 `run <bvid>` 复用 Brief 与人工复核;写盘失败只
+    审计不中断管线(cmd_study 是独立命令才以退出码 6 报落盘失败)。"""
+    bvid = str(ctx.get('bvid') or '')
+    if not bvid:
+        return
+    record = {
+        'bvid': bvid,
+        'url': 'https://www.bilibili.com/video/%s' % bvid,
+        'title': ctx.get('title'),
+        'up': {'mid': ctx.get('up_mid'), 'name': ctx.get('up_name')},
+        'views': ctx.get('views'),
+        'studied_at': _now(),
+        'gate': {'scores': _gate_scores(ctx), 'n_comments': ctx.get('n_comments'),
+                 'transcript_len': len(ctx.get('transcript') or ''),
+                 'summary_len': len(ctx.get('ai_summary') or ''),
+                 'passed': brief is not None},
+        'brief': brief,
+    }
+    if brief is None:
+        record['skip'] = {'why': why or 'understand_fail'}
+    try:
+        _save_study(bvid, record)
+    except OSError as e:
+        _audit('comment_skip', {'bvid': bvid, 'why': 'study_save_fail',
+                                'err': str(e)[:100]})
+
+
+def _pipeline_one(cand, mode, st, reuse_study=False):
+    """单候选全管线(t6 抽取,cmd_run 与 patrol 链共用):理解→机会点→起草→
+    预算→审核→按 mode 出口。cand 至少含 bvid;st 由调用方加载、必要处自存。
+    reuse_study=True 走 run <bvid> 通道(Brief 优先复用 studies 落盘结果,失败无
+    细分原因);False 走现拉 _fetch_context_detailed/_understand_detailed(带
+    原因,并落盘 study 记录)。返回 (verdict, info),verdict:
+      study 层: 'study_fail'(reuse)/'info_fail'/'no_context'/'understand_fail'/
+                'sensitive_or_offdomain'   —— 候选级放弃
+      起草层:   'no_opportunity'/'draft_giveup' —— 候选级放弃
+      'budget:<why>'                    —— 账号级,调用方应整轮结束
+      'dropped:<why>'                   —— 审核拦下(候选级)
+      'dryrun'/'queued'                 —— dryrun/review 出口(出 1 条即停)
+      'posted'                          —— auto 已发布+复核(已记账)
+      'skip_api'                        —— 发布候选级失败(已记 seen,下一候选)
+      'halt'                            —— 账号级硬停(info['rc']=透传退出码)"""
+    bvid = str(cand['bvid'])
+    if reuse_study:
+        ctx, brief = _ctx_brief_for(bvid)
+        if ctx is None:
+            return 'study_fail', {}
+    else:
+        ctx, swhy = _fetch_context_detailed(bvid)
+        if ctx is None:
+            return swhy or 'info_fail', {}
+        brief, uwhy = _understand_detailed(ctx)
+        _save_study_record(ctx, brief, uwhy)      # t6:study 留档(成功/放弃都写)
+        if brief is None:
+            return uwhy or 'understand_fail', {}
+
+    opp = pick_opportunity(brief, ctx)
+    if opp is None:
+        _audit('comment_skip', {'bvid': bvid, 'why': 'no_opportunity'})
+        return 'no_opportunity', {}
+    draft = draft_comment(ctx, brief, opp)
+    if draft is None:
+        _audit('comment_skip', {'bvid': bvid, 'why': 'draft_giveup'})
+        return 'draft_giveup', {}
+
+    ok, why = budget_gate(st, ctx.get('up_mid') or cand.get('up_mid') or '')
+    if not ok:
+        _audit('comment_budget_block', {'bvid': bvid, 'why': why})
+        return 'budget:' + why, {}                # 账号级,整轮结束
+
+    ok, why = review(draft, ctx, brief, st)
+    if not ok:
+        st['today']['dropped'] = st['today'].get('dropped', 0) + 1
+        _audit('comment_drop', {'bvid': bvid, 'why': why,
+                                'draft': draft['text'][:80]})
+        return 'dropped:' + why, {}
+
+    qitem = {'bvid': bvid, 'up_mid': ctx.get('up_mid') or '',
+             'up_name': ctx.get('up_name') or '',
+             'title': ctx.get('title') or cand.get('title') or '',
+             'draft': draft, 'brief_topic': str(brief.get('topic') or ''),
+             'queued_at': _now()}
+    if mode == 'dryrun':
+        _audit('comment_dryrun', {'bvid': bvid, 'draft': draft['text'],
+                                  'value_type': draft.get('value_type', ''),
+                                  'evidence': draft.get('evidence_quote', '')})
+        print('[comment][dry-run] %s -> %s\n  证据: %s\n  类型: %s' % (
+            bvid, draft['text'], draft.get('evidence_quote', ''),
+            draft.get('value_type', '')))
+        return 'dryrun', {'draft': draft}         # 不烧 bvid(同视频可再试)
+    if mode == 'review':
+        n = _queue_append(qitem)
+        _audit('comment_queued', {'bvid': bvid, 'draft': draft['text']})
+        st['seen'][bvid] = {'ts': _now(), 'status': 'queued'}
+        _save_comment_state(st)
+        print('[comment][review] 草稿#%d 入队待人工审核: py -3.12 bili_comment.py queue' % n)
+        return 'queued', {'draft': draft}
+
+    # mode == 'auto'(白名单已在 fetch_context 收紧)
+    target = {'bvid': bvid}
+    if draft.get('reply_to'):
+        target.update(draft['reply_to'])
+    rpid, err = publish(target, draft['text'])
+    if err:
+        rc = _handle_publish_err(err, st, bvid, ctx.get('up_mid') or '')
+        if rc is not None:
+            return 'halt', {'rc': rc, 'err': err}   # 账号级硬停,退出码透传
+        return 'skip_api', {'err': err}             # 候选级 API 失败:下一候选
+    _bookkeep(st, bvid, ctx.get('up_mid') or '', ctx.get('up_name') or '', rpid, draft)
+    status = _after_publish(st, bvid, rpid)
+    print('[comment] 已发布 %s rpid=%s 复核=%s' % (bvid, rpid, status))
+    return 'posted', {'rpid': rpid, 'check': status}
+
+
+def patrol_pipeline(cand, mode=None):
+    """patrol 评论链单候选入口(t6;bili_ops.cmd_patrol 懒加载调用,防模块级环):
+    加载评论状态→单候选管线(现拉素材+study 留档)→保存状态。
+    cand: {'bvid': ..., 'title': ..., 'views': ...}(bili_ops._patrol_candidates
+    输出即可);mode 缺省读 config comment_mode。返回 (verdict, info):
+      'off'      评论功能关闭(patrol 侧只按标题过滤点赞,链路零成本)
+      'seen'     同视频永不二评(已评过/已入队),本轮仅点赞
+      其余同 _pipeline_one(no_context/understand_fail/sensitive_or_offdomain/
+      no_opportunity/draft_giveup/budget:*/dropped:*/dryrun/queued/posted/
+      skip_api/halt)。
+    bili_ops 侧点赞决策:halt→停止全部写动作;sensitive_or_offdomain→跳过点赞。"""
+    mode = mode or str(CONFIG.get('comment_mode') or 'off')
+    if mode not in ('dryrun', 'review', 'auto'):
+        return 'off', {}
+    bvid = str((cand or {}).get('bvid') or '')
+    if not _BV_RE.search(bvid):
+        return 'bad_bvid', {}
+    st = _load_comment_state()
+    if bvid in st.get('seen', {}):
+        return 'seen', {}
+    verdict, info = _pipeline_one(cand, mode, st)
+    _save_comment_state(st)
+    return verdict, info
+
+
 def cmd_run(mode_override=None, bvid=None):
-    """主链(设计 §9.2):发现→候选×≤3(理解→机会点→起草→预算→审核)→发布≤1→复核。
+    """主链(设计 §9.2):发现→候选×≤3(单候选管线 _pipeline_one)→发布≤1→复核。
     bvid 给定时跳过发现(素材现拉,Brief 优先复用 study 落盘结果)。
     dryrun/review 出 1 条草稿即停;auto 发布后复核。返回进程退出码。"""
     st = _load_comment_state()
@@ -1209,76 +1354,20 @@ def cmd_run(mode_override=None, bvid=None):
     for cand in candidates[:CANDIDATES_PER_RUN]:
         if posted >= PER_RUN_POST_MAX:
             break
-        bvid = cand['bvid']
-        if bvid in st.get('seen', {}):
+        if cand['bvid'] in st.get('seen', {}):
             continue                                   # 同视频只评一次(含已入队/已评)
-        if bare:
-            ctx = fetch_context(bvid)
-            if ctx is None:
-                continue
-            brief = understand(ctx)
-            if brief is None:
-                continue
-        else:
-            ctx, brief = _ctx_brief_for(bvid)
-            if ctx is None:
-                continue
-        opp = pick_opportunity(brief, ctx)
-        if opp is None:
-            _audit('comment_skip', {'bvid': bvid, 'why': 'no_opportunity'})
-            continue
-        draft = draft_comment(ctx, brief, opp)
-        if draft is None:
-            _audit('comment_skip', {'bvid': bvid, 'why': 'draft_giveup'})
-            continue
-
-        ok, why = budget_gate(st, ctx.get('up_mid') or cand.get('up_mid') or '')
-        if not ok:
-            _audit('comment_budget_block', {'bvid': bvid, 'why': why})
+        verdict, info = _pipeline_one(cand, mode, st, reuse_study=not bare)
+        if verdict.startswith('budget:'):
             break                                      # 账号级原因,整轮结束
-        ok, why = review(draft, ctx, brief, st)
-        if not ok:
+        if verdict == 'halt':
+            return info.get('rc', 5)                   # 风控/硬停码透传(已硬停)
+        if verdict in ('queued', 'dryrun'):
+            return 0                                   # 出 1 条草稿即停
+        if verdict == 'posted':
+            posted += 1
+        elif verdict.startswith('dropped:'):
             dropped += 1
-            st['today']['dropped'] = st['today'].get('dropped', 0) + 1
-            _audit('comment_drop', {'bvid': bvid, 'why': why,
-                                    'draft': draft['text'][:80]})
-            continue
-
-        qitem = {'bvid': bvid, 'up_mid': ctx.get('up_mid') or '',
-                 'up_name': ctx.get('up_name') or '',
-                 'title': ctx.get('title') or cand.get('title') or '',
-                 'draft': draft, 'brief_topic': str(brief.get('topic') or ''),
-                 'queued_at': _now()}
-        if mode == 'dryrun':
-            _audit('comment_dryrun', {'bvid': bvid, 'draft': draft['text'],
-                                      'value_type': draft.get('value_type', ''),
-                                      'evidence': draft.get('evidence_quote', '')})
-            print('[comment][dry-run] %s -> %s\n  证据: %s\n  类型: %s' % (
-                bvid, draft['text'], draft.get('evidence_quote', ''),
-                draft.get('value_type', '')))
-            return 0                                   # dry-run 只出 1 条草稿即停(不烧 bvid)
-        if mode == 'review':
-            n = _queue_append(qitem)
-            _audit('comment_queued', {'bvid': bvid, 'draft': draft['text']})
-            st['seen'][bvid] = {'ts': _now(), 'status': 'queued'}
-            _save_comment_state(st)
-            print('[comment][review] 草稿#%d 入队待人工审核: py -3.12 bili_comment.py queue' % n)
-            return 0
-
-        # mode == 'auto'(白名单已在 fetch_context 收紧)
-        target = {'bvid': bvid}
-        if draft.get('reply_to'):
-            target.update(draft['reply_to'])
-        rpid, err = publish(target, draft['text'])
-        if err:
-            rc = _handle_publish_err(err, st, bvid, ctx.get('up_mid') or '')
-            if rc is not None:
-                return rc
-            continue                                   # 候选级失败:下一候选
-        _bookkeep(st, bvid, ctx.get('up_mid') or '', ctx.get('up_name') or '', rpid, draft)
-        posted += 1
-        status = _after_publish(st, bvid, rpid)
-        print('[comment] 已发布 %s rpid=%s 复核=%s' % (bvid, rpid, status))
+        # study/起草层放弃与 skip_api:候选级,继续下一候选
 
     _save_comment_state(st)
     if posted == 0 and dropped > 0:
