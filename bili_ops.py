@@ -16,6 +16,8 @@
   py -3.12 bili_ops.py patrol         站内巡查:搜AI内容 → 适量点赞/关注
   py -3.12 bili_ops.py report         运营日报:指标快照+动作量统计+明日建议
   py -3.12 bili_ops.py report --raw   日报之外附原始 JSON(排障用)
+  py -3.12 bili_ops.py article        专栏草稿:最近一批已发条目汇编"AI 日报"(仅本地)
+  py -3.12 bili_ops.py article <n>    专栏草稿:候选 n 的完整编译稿(仅本地,不发)
 
 report 说明:
   - 拉取 me show / me stats / dynamic list,落快照 metrics/<date>.json
@@ -469,13 +471,120 @@ def cmd_report(argv):
         print('== dynamic list raw ==\n%s' % out.strip()[:1200])
 
 
+# ---------------- article:专栏草稿(仅本地,不发布) ----------------
+# 预研结论(2026-11-12 t8):bili-cli 无专栏命令;bilibili-api-python 17.4.2
+# 的 article/opus 模块只有读与点赞/收藏,无创建/草稿/发布端点;官方开放平台
+# 专栏提交需申请 ATC_BASE 权限。故专栏先走"本地草稿+人工发布",自动发布
+# 待凭据与端点方案成熟后另行实现(详见任务 t8 报告)。
+
+ARTICLE_DIR = os.path.join(BASE, 'article_drafts')
+
+_ARTICLE_NOTE = (
+    '\n---\n\n<!-- AI-Radar 自动生成草稿,未发布。B站专栏暂无自动发布通道;\n'
+    '请人工校对后粘贴到创作中心(https://member.bilibili.com/platform/upload/text)发布。 -->\n')
+
+
+def _load_sent_items():
+    """取 sent_log.json 最新一批条目(与当日邮件同源:t 标题/s 摘要/f 编译稿/l 链接)。"""
+    log = _load_json(os.path.join(BASE, 'sent_log.json'), [])
+    for batch in reversed(log):
+        items = [it for it in (batch.get('items') or []) if it.get('t')]
+        if items:
+            return batch.get('ts'), items
+    return None, []
+
+
+def _clean_summary(s):
+    """清洗 sent_log 存储摘要:去"详细编译:"指针尾巴(存储截断残留)、
+    句界收尾、上游 LLM 报错串直接弃用。"""
+    if not s:
+        return ''
+    s = re.split(r'详细编译[：:]', s)[0].strip()
+    if _REPLY_BAD_RE.search(s):
+        return ''
+    # 存储截断可能落在半句:依次尝试 句号级→分号级→逗号级 边界回退收尾
+    for pat, minlen in ((r'[。！？!?]', 40), (r'[；;]', 40), (r'[，,、]', 60)):
+        last = None
+        for m in re.finditer(pat, s):
+            last = m
+        if last and last.end() >= minlen:
+            return s[:last.end()].rstrip('，,、；;：:')
+    return s
+
+
+def _article_daily():
+    """日报草稿:最近一批已发条目汇编成一篇专栏(每条=标题+摘要+原文链接)。"""
+    ts, items = _load_sent_items()
+    if not items:
+        print('[article] sent_log.json 无可用条目')
+        sys.exit(1)
+    day = time.strftime('%Y-%m-%d', time.localtime(ts / 1000)) if ts else time.strftime('%Y-%m-%d')
+    lines = ['# AI 快讯日报 %s' % day, '',
+             '今日共 %d 条:AI 领域论文、产品与开源动态速览。' % len(items), '']
+    for i, it in enumerate(items, 1):
+        summ = _clean_summary(it.get('s') or (it.get('f') or '')[:220])
+        lines += ['## %d. %s' % (i, (it.get('t') or '').strip()), '']
+        if summ:
+            lines += [summ, '']
+        lines += ['原文: %s' % (it.get('l') or '').strip(), '']
+    title = 'AI 快讯日报 %s' % day
+    return title, '\n'.join(lines)
+
+
+def _article_single(n):
+    """单篇长文草稿:候选 n 的完整编译稿(专栏装得下,无需压缩)。"""
+    state = _load_json(STATE, {})
+    drafts = [d for d in (state.get('bili_drafts') or []) if d.get('n') == n]
+    if not drafts:
+        print('[article] 候选 %s 不存在(现有: %s);无候选时可无参运行生成日报草稿' % (
+            n, [d.get('n') for d in (state.get('bili_drafts') or [])]))
+        sys.exit(1)
+    d = drafts[0]
+    title = (d.get('title_cn') or d.get('title') or '(无标题)').strip()
+    body = (d.get('full_text') or d.get('summary') or '').strip()
+    if not body:
+        print('[article] 候选 %s 无正文' % n)
+        sys.exit(1)
+    link = (d.get('link') or '').strip()
+    text = '%s\n\n%s' % (title, body)
+    if link:
+        text += '\n\n原文: %s' % link
+    return title, text
+
+
+def cmd_article(n=None):
+    """生成专栏草稿(仅本地 article_drafts/,不发布、不联网):
+    无参 = 最近一批已发条目汇编"AI 日报";n = 候选编号的单篇完整编译稿。"""
+    if n is None or n == 'day':
+        title, text = _article_daily()
+        kind = 'daily'
+    else:
+        try:
+            title, text = _article_single(int(n))
+            kind = 'single'
+        except ValueError:
+            print('[article] 参数须为候选编号或省略(日报);收到: %s' % n)
+            sys.exit(1)
+    os.makedirs(ARTICLE_DIR, exist_ok=True)
+    stamp = time.strftime('%Y%m%d_%H%M%S')
+    slug = re.sub(r'[\\/:*?"<>|\s]+', '_', title)[:40]
+    path = os.path.join(ARTICLE_DIR, '%s_%s_%s.md' % (stamp, kind, slug))
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(text + _ARTICLE_NOTE)
+    _audit('article_draft', {'kind': kind, 'title': title[:60], 'path': path,
+                             'chars': len(text), 'published': False})
+    print('[article] 草稿已存(未发布): %s (%d 字)' % (path, len(text)))
+
+
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('inbox', 'patrol', 'report'):
+    if len(sys.argv) < 2 or sys.argv[1] not in ('inbox', 'patrol', 'report', 'article'):
         print(__doc__)
         sys.exit(1)
     cmd = sys.argv[1]
     if cmd == 'report':
         cmd_report(sys.argv[2:])
+    elif cmd == 'article':
+        cmd_article(sys.argv[2] if len(sys.argv) > 2 else None)
     else:
         {'inbox': cmd_inbox, 'patrol': cmd_patrol}[cmd]()
 
