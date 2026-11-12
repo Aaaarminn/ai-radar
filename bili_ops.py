@@ -14,7 +14,16 @@
 用法:
   py -3.12 bili_ops.py inbox          处理未读:评论回复/@我 → LLM 起草 → 回复
   py -3.12 bili_ops.py patrol         站内巡查:搜AI内容 → 适量点赞/关注
-  py -3.12 bili_ops.py report         账号报告(资料/动态列表/数据)
+  py -3.12 bili_ops.py report         运营日报:指标快照+动作量统计+明日建议
+  py -3.12 bili_ops.py report --raw   日报之外附原始 JSON(排障用)
+
+report 说明:
+  - 拉取 me show / me stats / dynamic list,落快照 metrics/<date>.json
+    (粉丝/周播放/周访客/周新粉/累计获赞/评论/转发/动态数),与前一快照自动对比
+  - 从 bili_audit.jsonl 统计每日动作量(reply/like/comment/dynamic),
+    发动态量另并 state.json 的 bili_sent 记账(radar.py 发布侧暂无审计)
+  - 输出可贴给用户看的运营日报文本:今日发布/账号数据/趋势/明日建议
+  - me stats 偶发 SSL reset(curl 35),_bili_retry 重试即可
 """
 import json
 import os
@@ -24,10 +33,17 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bili_publish import _run_bili, _claude_cli as _claude  # noqa: E402  复用 bili-cli 通道与 claude CLI
+from bili_publish import (_run_bili, _claude_cli as _claude,  # noqa: E402
+                          _load_json)  # 复用 bili-cli 通道/claude CLI/JSON 读取
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 AUDIT = os.path.join(BASE, 'bili_audit.jsonl')
+STATE = os.path.join(BASE, 'state.json')
+METRICS_DIR = os.path.join(BASE, 'metrics')
+
+# 运营日报统计的动作口径:reply/like/comment 来自审计日志;dynamic 发布量
+# 合并 bili_sent 记账(radar.py 发布侧暂无审计,站点动态列表为最终权威)
+REPORT_ACTIONS = ('reply', 'like', 'comment', 'dynamic')
 
 # 回复轻审核:乱码/错误文本/助手腔(发布级 _quality_guard 有字数门槛,回复不适用)
 _REPLY_BAD_RE = re.compile(
@@ -160,17 +176,308 @@ def cmd_patrol():
     print('[ops] 本轮点赞 %d 个。' % liked)
 
 
-def cmd_report():
-    for args in (['me', 'show'], ['me', 'stats'], ['dynamic', 'list']):
-        rc, payload, out = _run_bili(args, timeout=60)
-        print('== %s ==\n%s' % (' '.join(args), out.strip()[:600]))
+# ---------------- report:数据看板/运营日报 ----------------
+
+def _bili_retry(args, tries=3, timeout=60, pause=4):
+    """带重试的 bili-cli 调用:me stats 偶发 SSL reset(curl 35),重试即可。"""
+    rc, payload, out = -1, None, ''
+    for i in range(tries):
+        rc, payload, out = _run_bili(args, timeout=timeout)
+        if rc == 0 and payload and payload.get('ok'):
+            return rc, payload, out
+        if i < tries - 1:
+            print('[ops] %s 第%d次失败,%ds 后重试: %s'
+                  % (' '.join(args), i + 1, pause, out.strip()[:120]))
+            time.sleep(pause)
+    return rc, payload, out
+
+
+def _num(v):
+    """JSON 数值/None -> int 或 None(null 保持无数据,不做 0 假设)。"""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_audit_counts():
+    """bili_audit.jsonl -> {date: {action: n}}。skip_* 归并为一类 skip,
+    便于日报展示"被审核拦下"的量。"""
+    per_day = {}
+    try:
+        with open(AUDIT, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                day = str(rec.get('ts') or '')[:10]
+                act = str(rec.get('action') or '?')
+                if act.startswith('skip_'):
+                    act = 'skip'
+                d = per_day.setdefault(day, {})
+                d[act] = d.get(act, 0) + 1
+    except OSError:
+        pass
+    return per_day
+
+
+def _load_sent_days():
+    """state.json bili_sent 记账 -> {date: n}(每日发布动态条数)。"""
+    sent = _load_json(STATE, {}).get('bili_sent') or []
+    per_day = {}
+    for it in sent:
+        day = str(it.get('d') or '')[:10]
+        if day:
+            per_day[day] = per_day.get(day, 0) + 1
+    return per_day
+
+
+def _collect_snapshot(today):
+    """拉 me show/me stats/dynamic list 组装当日指标快照。
+    me stats 偶发 curl 35 由 _bili_retry 兜;单项失败降级为 None,不炸整体。"""
+    snap = {'date': today, 'ts': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'name': '', 'sign': '', 'level': None,
+            'fans': None, 'unfollowed_week': None,
+            'plays_week': None, 'visitors_week': None, 'new_fans_week': None,
+            'stats_data_date': '',
+            'likes_total': None, 'comments_total': None, 'forwards_total': None,
+            'dynamics_total': None, 'posted_today': []}
+
+    rc, payload, out = _bili_retry(['me', 'show'])
+    if payload and payload.get('ok'):
+        d = payload.get('data') or {}
+        snap['name'] = d.get('name') or ''
+        snap['sign'] = d.get('sign') or ''
+        snap['level'] = _num(d.get('level'))
+
+    rc, payload, out = _bili_retry(['me', 'stats'])
+    if payload and payload.get('ok'):
+        st = payload.get('data') or {}
+        snap['stats_data_date'] = str(st.get('data_date') or '')
+        fans = st.get('fans') or {}
+        snap['fans'] = _num(fans.get('total'))
+        snap['unfollowed_week'] = _num(fans.get('unfollowed'))
+        snap['plays_week'] = _num((st.get('plays') or {}).get('now'))
+        snap['visitors_week'] = _num((st.get('visitors') or {}).get('now'))
+        snap['new_fans_week'] = _num((st.get('new_fans') or {}).get('now'))
+
+    rc, payload, out = _bili_retry(['dynamic', 'list'])
+    items = (payload.get('data') or {}).get('items') if payload and payload.get('ok') else None
+    if items:
+        likes = comments = forwards = 0
+        for it in items:
+            stat = it.get('stat') or {}
+            likes += _num(stat.get('like')) or 0
+            comments += _num(stat.get('comment')) or 0
+            forwards += _num(stat.get('forward')) or 0
+            t = str(it.get('time') or '')
+            if t[:10] == today:
+                title = (it.get('text') or '').strip().split('\n')[0][:60]
+                snap['posted_today'].append(
+                    {'time': t, 'title': title, 'url': it.get('url') or ''})
+        snap['likes_total'] = likes
+        snap['comments_total'] = comments
+        snap['forwards_total'] = forwards
+        snap['dynamics_total'] = len(items)
+    return snap
+
+
+def _save_snapshot(snap):
+    os.makedirs(METRICS_DIR, exist_ok=True)
+    path = os.path.join(METRICS_DIR, '%s.json' % snap['date'])
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(snap, f, ensure_ascii=False, indent=1)
+    return path
+
+
+def _snap_date(s):
+    return str(s.get('date') or '')
+
+
+def _load_snapshots():
+    """metrics/ 下全部快照按日期升序(坏文件跳过)。"""
+    out = []
+    try:
+        names = sorted(f for f in os.listdir(METRICS_DIR) if f.endswith('.json'))
+    except OSError:
+        return out
+    for fn in names:
+        s = _load_json(os.path.join(METRICS_DIR, fn), None)
+        if isinstance(s, dict) and _snap_date(s):
+            out.append(s)
+    out.sort(key=_snap_date)
+    return out
+
+
+def _prev_snapshot(today):
+    """早于 today 的最近一份快照(无则 None)。"""
+    prev = [s for s in _load_snapshots() if _snap_date(s) < today]
+    return prev[-1] if prev else None
+
+
+def _fmt_delta(cur, prev):
+    """对比展示:null 不做 0 假设,如实标"无数据"。"""
+    if cur is None:
+        return '无数据'
+    if prev is None:
+        return '%s' % cur
+    return '%d(较前日%+d)' % (cur, cur - prev)
+
+
+def _trend_table(snaps):
+    """近 7 日快照趋势表(粉丝/获赞/评论/动态/周播放)。"""
+    lines = ['  日期        粉丝  获赞  评论  动态  周播放',
+             '  ' + '-' * 42]
+    for s in snaps[-7:]:
+        lines.append('  %s  %4s  %4s  %4s  %4s  %5s' % (
+            _snap_date(s),
+            s.get('fans') if s.get('fans') is not None else '-',
+            s.get('likes_total') if s.get('likes_total') is not None else '-',
+            s.get('comments_total') if s.get('comments_total') is not None else '-',
+            s.get('dynamics_total') if s.get('dynamics_total') is not None else '-',
+            s.get('plays_week') if s.get('plays_week') is not None else '-'))
+    return lines
+
+
+def _action_table(audit_days, sent_days, days=7):
+    """近 N 日动作量表:点赞/回复/评论出自审计日志,发动态=审计+发布记账。"""
+    today = time.strftime('%Y-%m-%d')
+    dates = sorted(set(audit_days) | set(sent_days))[-days:]
+    lines = ['  日期         点赞  回复  评论  发动态  被审核拦下',
+             '  ' + '-' * 46]
+    for day in dates:
+        a = audit_days.get(day, {})
+        lines.append('  %s  %4d  %4d  %4d  %5d  %8d%s' % (
+            day,
+            a.get('like', 0), a.get('reply', 0), a.get('comment', 0),
+            a.get('dynamic', 0) + sent_days.get(day, 0),
+            a.get('skip', 0),
+            '  (今日)' if day == today else ''))
+    return lines
+
+
+def _suggestions(snap, prev, audit_today, sent_today):
+    """规则化"明日计划建议":只依据快照/审计事实,不编数据。"""
+    tips = []
+    posted = snap.get('posted_today') or []
+    if not posted:
+        tips.append('今日未发动态:radar 编译稿会自动进 bili_drafts,'
+                    '可用 bili_publish.py preview/send 补发,保持日更节奏。')
+    else:
+        tips.append('保持日更节奏(今日已发 %d 条),发布稳定在下午至晚间流量高峰。'
+                    % len(posted))
+    if (snap.get('comments_total') or 0) > 0 and audit_today.get('reply', 0) == 0:
+        tips.append('动态已有评论但今日未跑 inbox 回复:明日先处理评论回复,'
+                    '互动响应速度影响起步期权重。')
+    fans, prev_fans = snap.get('fans'), (prev or {}).get('fans')
+    if fans is not None and prev_fans is not None and fans <= prev_fans:
+        tips.append('粉丝零增长:加大站内互动(patrol 点赞/评论垂直领域内容),'
+                    '让目标作者与观众回访主页。')
+    if snap.get('plays_week') in (None, 0):
+        tips.append('周播放数据尚未生成(B站创作中心周报滞后,新号起步期):'
+                    '以内容稳定输出为主,周报出数后再看内容方向调整。')
+    if audit_today.get('skip', 0) >= 3:
+        tips.append('今日被审核拦下的回复/草稿较多(%d 条):明日检查起草质量,'
+                    '必要时收紧 PERSONA。' % audit_today.get('skip', 0))
+    if not tips:
+        tips.append('数据正常,按现有节奏继续。')
+    return tips
+
+
+def _build_report(snap, prev, audit_days, sent_days):
+    """组装可贴给用户看的运营日报文本。"""
+    today = snap['date']
+    L = []
+    L.append('==== %s 运营日报(%s)====' % (snap.get('name') or 'NImraaaa', today))
+    if snap.get('sign'):
+        L.append('定位: %s%s' % (snap.get('sign'), ' | Lv.%s' % snap['level']
+                                 if snap.get('level') is not None else ''))
+    L.append('')
+
+    posted = snap.get('posted_today') or []
+    L.append('【今日发布】%d 条' % len(posted))
+    if posted:
+        for p in posted:
+            hhmm = (p.get('time') or '')[11:16] or '??:??'
+            L.append('  - %s %s -> %s' % (hhmm, p.get('title') or '(无标题)',
+                                          p.get('url') or ''))
+    else:
+        L.append('  (今日未发动态)')
+    L.append('')
+
+    L.append('【账号数据】')
+    L.append('  粉丝 %s | 获赞 %s | 评论 %s | 转发 %s | 动态 %s' % (
+        _fmt_delta(snap.get('fans'), (prev or {}).get('fans')),
+        _fmt_delta(snap.get('likes_total'), (prev or {}).get('likes_total')),
+        _fmt_delta(snap.get('comments_total'), (prev or {}).get('comments_total')),
+        _fmt_delta(snap.get('forwards_total'), (prev or {}).get('forwards_total')),
+        _fmt_delta(snap.get('dynamics_total'), (prev or {}).get('dynamics_total'))))
+    dd = snap.get('stats_data_date') or ''
+    L.append('  周报(B站数据日期 %s):周播放 %s | 周访客 %s | 周新粉 %s | 周掉粉 %s' % (
+        dd or '无',
+        _fmt_delta(snap.get('plays_week'), (prev or {}).get('plays_week')),
+        _fmt_delta(snap.get('visitors_week'), (prev or {}).get('visitors_week')),
+        _fmt_delta(snap.get('new_fans_week'), (prev or {}).get('new_fans_week')),
+        _fmt_delta(snap.get('unfollowed_week'), (prev or {}).get('unfollowed_week'))))
+    L.append('')
+
+    a_today = audit_days.get(today, {})
+    L.append('【今日动作量】(来源: bili_audit.jsonl + bili_sent 记账)')
+    L.append('  点赞 %d | 回复 %d | 评论 %d | 发动态 %d | 被审核拦下 %d' % (
+        a_today.get('like', 0), a_today.get('reply', 0), a_today.get('comment', 0),
+        a_today.get('dynamic', 0) + sent_days.get(today, 0),
+        a_today.get('skip', 0)))
+    L.append('')
+    L.append('【近7日动作量】')
+    L.extend(_action_table(audit_days, sent_days))
+    L.append('  (发动态为日志记账口径;站点实发以【今日发布】为准)')
+    L.append('')
+    L.append('【指标趋势】(metrics/ 快照对比)')
+    snaps = [s for s in _load_snapshots() if _snap_date(s) <= today]
+    if len(snaps) >= 2:
+        L.extend(_trend_table(snaps))
+    else:
+        L.append('  快照积累中(当前 %d 份):自明日起可看粉丝/获赞/评论逐日变化。'
+                 % len(snaps))
+    L.append('')
+    L.append('【明日计划建议】')
+    for i, tip in enumerate(_suggestions(snap, prev, a_today,
+                                         sent_days.get(today, 0)), 1):
+        L.append('  %d. %s' % (i, tip))
+    return '\n'.join(L)
+
+
+def cmd_report(argv):
+    today = time.strftime('%Y-%m-%d')
+    # ① 拉取三项基础数据,落当日指标快照(me stats 偶发 curl 35,重试兜底)
+    snap = _collect_snapshot(today)
+    path = _save_snapshot(snap)
+    prev = _prev_snapshot(today)          # ② 与前一快照对比
+    audit_days = _load_audit_counts()     # ③ 审计日志每日动作量
+    sent_days = _load_sent_days()         # 发布记账(补 radar 发布侧无审计)
+    print(_build_report(snap, prev, audit_days, sent_days))  # ④ 运营日报
+    print()
+    print('[ops] 快照已存: %s' % path)
+    if '--raw' in argv:                   # 排障:附原始 JSON
+        rc, payload, out = _bili_retry(['me', 'stats'])
+        print('== me stats raw ==\n%s' % out.strip()[:1200])
+        rc, payload, out = _bili_retry(['dynamic', 'list'])
+        print('== dynamic list raw ==\n%s' % out.strip()[:1200])
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in ('inbox', 'patrol', 'report'):
         print(__doc__)
         sys.exit(1)
-    {'inbox': cmd_inbox, 'patrol': cmd_patrol, 'report': cmd_report}[sys.argv[1]]()
+    cmd = sys.argv[1]
+    if cmd == 'report':
+        cmd_report(sys.argv[2:])
+    else:
+        {'inbox': cmd_inbox, 'patrol': cmd_patrol}[cmd]()
 
 
 if __name__ == '__main__':
