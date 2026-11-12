@@ -117,25 +117,77 @@ _SHRINK_BAD_RE = re.compile(
     r'|两个建议|建议(?:如下|一|二)|未收到|收到(?:的|了)?(?:开头|半截|部分)'
     r'|我(?:无法|没法|不能)(?:凭|确认|完成)')
 
+# 提示词(2026-11-12 t8 调优):把"守字数/完整收尾"列为硬性要求并解释后果,
+# 引导 LLM 用删段落而不是压句子来守预算,保住数字/人名/机构/时间线等信息密度。
+_SHRINK_PROMPT = (
+    '你是新闻编辑。把下面的 AI 新闻中文编译稿压缩成一篇不超过 %d 字的完整新闻摘要。\n'
+    '硬性要求:\n'
+    '1. 全文不超过 %d 字——这是发布平台的硬上限,超出会被机器从中间截断;'
+    '请通过删掉整段次要内容来守预算,不要把每句都压成半句。\n'
+    '2. 保留全部关键事实:具体数字(百分比/金额/参数/排名)、人名、公司/机构名、'
+    '时间线、结论与因果链,一个都不能丢。\n'
+    '3. 只删次要细节、重复表述与空话过渡;删完仍须是连贯可读的新闻正文,不是要点罗列。\n'
+    '4. 必须以完整句子自然收尾:最后一句语意必须完整,严禁半句截断,'
+    '禁止以省略号/逗号/冒号结尾。\n'
+    '5. 输出纯正文:不要标题、前言、解释、编号列表或引号。\n\n%s')
+
+
+def _ends_badly(t):
+    """压缩稿烂尾检测:以省略号收尾,或停在逗号/冒号/左括号等半句位置。"""
+    t = t.rstrip()
+    if not t:
+        return True
+    if t.endswith('……') or t.endswith('...'):
+        return True
+    return t[-1] in '，,、：:；(（“"'
+
+
+def _shrink_ok(out, limit):
+    """压缩稿合格判定:无异常文本、不超预算、完整收尾、中文占比达标。"""
+    if not out or _SHRINK_BAD_RE.search(out):
+        return False
+    t = out.strip()
+    if len(t) > limit or _ends_badly(t):
+        return False
+    cjk = len(re.findall(r'[\u4e00-\u9fff]', t))
+    nonws = len(re.sub(r'\s', '', t))
+    return cjk >= 200 and (not nonws or cjk / nonws >= 0.5)
+
 
 def _shrink_body(body, limit):
-    """LLM 把编译稿压缩到 limit 字内的新闻摘要(保全部关键事实)。
-    返回压缩稿,不可信/失败返回 ''(调用方走兜底)。"""
-    prompt = (
-        '你是新闻编辑。把下面的 AI 新闻中文编译稿压缩成不超过 %d 字的完整新闻摘要：'
-        '保留全部关键事实(数字、人名、机构、时间线、结论与因果)，只删除次要细节和重复表述。'
-        '输出纯正文，不要标题、不要前言、不要任何解释或引号。\n\n%s' % (limit, body))
+    """LLM 把编译稿压缩到 limit 字内的新闻摘要(保全部关键事实、完整收尾)。
+
+    首稿超预算或烂尾(半句/省略号)时,带重申提示重试一次;仍不合格返回 ''
+    (调用方走句子边界裁剪兜底)。"""
+    prompt = _SHRINK_PROMPT % (limit, limit, body)
     out = _claude_cli(prompt)
-    if not out or _SHRINK_BAD_RE.search(out):
-        if out:
-            print('[shrink] 压缩稿含异常文本,弃用')
-        return ''
-    cjk = len(re.findall(r'[\u4e00-\u9fff]', out))
-    nonws = len(re.sub(r'\s', '', out))
-    if cjk < 200 or (nonws and cjk / nonws < 0.5):   # 技术新闻英文术语多,0.6 会误伤;0.5 只拦"英文未译/夹生"
-        print('[shrink] 压缩稿中文占比/长度不足(cjk=%d),弃用' % cjk)
-        return ''
-    return out.strip()
+    if _shrink_ok(out, limit):
+        return out.strip()
+    if out:
+        print('[shrink] 首稿不合格(len=%d, %s),重申约束重试' % (
+            len(out), '超预算' if len(out) > limit else '烂尾/异常'))
+    retry = _claude_cli(prompt + '\n\n(重申:全文不超过 %d 字,'
+                        '必须以完整句子收尾,禁止以省略号或逗号结尾。)' % limit)
+    if _shrink_ok(retry, limit):
+        return retry.strip()
+    return ''
+
+
+def _trim_to_sentence(text, budget):
+    """把 text 裁进 budget,裁点选预算内最后一个完整句末标点(。！？!?\n)。
+
+    取代旧的 body[:keep]+'……' 字符截断——那是首条动态尾部出现
+    『有没有真实生产客户』目…… 半句的根因。预算内找不到句末标点
+    (极端情况)才退回硬截+省略号。"""
+    if len(text) <= budget:
+        return text
+    cut = text[:budget]
+    end = None
+    for m in re.finditer(r'[。！？!?\n]', cut):
+        end = m
+    if end and end.end() >= 120:        # 至少保留 120 字,防止裁得太短
+        return cut[:end.end()].rstrip()
+    return cut.rstrip() + '……'
 
 
 def _assemble(title, body, link, tags):
@@ -167,11 +219,18 @@ def _build_text(d, tags):
     overhead = len(title) + len(link) + len('\n\n原文: \n') + (len(tags) + 2 if tags else 0)
     budget = max(300, int((MAX_DYN_CHARS - overhead) * 0.95))
     shrunk = _shrink_body(body, budget)
+    if shrunk and len(shrunk) > budget:
+        # LLM 仍超预算(重试后):对压缩稿二次压缩;再不行句子边界裁剪,绝不硬截半句
+        tighter = _shrink_body(shrunk, int(budget * 0.85))
+        if tighter:
+            shrunk = tighter if len(tighter) <= budget else _trim_to_sentence(tighter, budget)
+        else:
+            shrunk = _trim_to_sentence(shrunk, budget)
     if shrunk:
         text = _assemble(title, shrunk, link, tags)
-    if len(text) > MAX_DYN_CHARS:            # 压缩失败或仍超长:兜底截断正文,永保链接
+    if len(text) > MAX_DYN_CHARS:            # 压缩失败或仍超长:句子边界裁剪正文,永保链接
         keep = max(100, MAX_DYN_CHARS - overhead - 20)
-        body = body[:keep].rstrip() + '……'
+        body = _trim_to_sentence(shrunk or body, keep)
         text = _assemble(title, body, link, tags)
     return text
 
