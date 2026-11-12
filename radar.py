@@ -684,9 +684,24 @@ def _summarize_api(prompt):
                      'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=60) as r:
             resp = json.loads(r.read().decode('utf-8'))
-        return (resp['choices'][0]['message'].get('content') or '').strip()
+        out = (resp['choices'][0]['message'].get('content') or '').strip()
+        if _is_api_err(out):
+            # 网关(如 GLM)把审查拒绝文本当 200 正常返回——按失败处理，
+            # 让 auto 模式继续降级 claude CLI / 抽取式兜底
+            print('[api] 通道返回审查拒绝/API错误文本，按失败处理')
+            return ''
+        return out
     except Exception:  # noqa: BLE001
         return ''
+
+
+# LLM 网关把"内容审查拒绝/API 错误"文本当作正常回复返回时的特征
+_API_ERR_RE = re.compile(r'API Error[:：]|不安全或敏感内容')
+
+
+def _is_api_err(s):
+    """识别审查拒绝/API错误文本——这类文本绝不能当摘要/编译稿上船"""
+    return bool(_API_ERR_RE.search(s or ''))
 
 
 def _has_cjk(s):
@@ -750,6 +765,10 @@ def summarize(title, text):
         s = _summarize_api(prompt)
     if not s and mode in ('auto', 'claude'):
         s = _claude(prompt)
+    if _is_api_err(s):
+        # CLI 通道同样可能把审查拒绝文本带回来，统一拦截后走下方兜底链
+        print('[summarize] LLM 输出为审查拒绝/API错误文本，按失败处理: %s' % (s or '')[:50])
+        s = ''
     if s:
         m_t = re.search(r'中文标题[:：]\s*(.+)', s)
         m_i = re.search(r'影响力[:：]\s*[^0-9]*(\d{1,2})', s)
@@ -801,6 +820,14 @@ def _readable(it):
     """语言门禁：标题/中文标题/摘要任一含中文即可上船"""
     return (_has_cjk(it.get('title') or '') or _has_cjk(it.get('title_cn') or '')
             or _has_cjk(it.get('summary') or ''))
+
+
+def _shippable(it):
+    """上船门禁 = 语言门禁 + 错误文本门禁（审查拒绝文本不能出现在任何字段）"""
+    if not _readable(it):
+        return False
+    return not (_is_api_err(it.get('summary') or '')
+                or _is_api_err(it.get('full_text') or ''))
 
 
 # ---------------------------------------------------------------- 主题聚类（同一事件多条报道 -> 一条）
@@ -989,21 +1016,21 @@ def flush_pending(state, force=False, slot=False):
 
     chosen = cluster_items(pending)
     for it in chosen[:SUMMARY_LIMIT]:
-        if not _readable(it):            # 无中文（含英文兜底摘要的旧条目）-> LLM 重译
+        if not _shippable(it):           # 无中文或含错误文本 -> 重跑 LLM（错误检测已生效）
             art = fetch_article(it['link'])
             (it['title_cn'], it['influence'],
              it['summary'], it['relevant'], it['full_text']) = summarize(it['title'], art)
 
-    # ---- 语言门禁：无中文条目不上船，留池等下周期补译（3 次后放弃） ----
-    ship = [it for it in chosen if _readable(it)]
+    # ---- 上船门禁：无中文(未翻译)或含审查拒绝文本的条目不上船，留池重试（3 次后放弃） ----
+    ship = [it for it in chosen if _shippable(it)]
     held = []
     for it in chosen:
-        if not _readable(it):
+        if not _shippable(it):
             it['_en_retry'] = it.get('_en_retry', 0) + 1
             if it['_en_retry'] < 3:
                 held.append(it)
     if held:
-        print('语言门禁：拦下 %d 条未翻译条目，留池重试。' % len(held))
+        print('上船门禁：拦下 %d 条（未翻译或审查拒绝）条目，留池重试。' % len(held))
     if not ship:
         print('本批 %d 条均未完成翻译，本次不发。' % len(chosen))
         state['pending'] = pending
