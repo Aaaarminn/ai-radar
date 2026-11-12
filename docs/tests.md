@@ -43,3 +43,21 @@
 统一 guard 替换三处历史规则后,旧行为全覆盖(只紧不松),通道差异符合
 docs/guard-rules.md 通道矩阵;发布链 `_quality_guard` 的 exit 4 语义与消息前缀
 保持,radar.py 发布子进程判定不受影响。
+
+## 2026-11-12 t9 收尾后校准:_topic_related 拉丁阈值 2→1
+
+- **触发**:t5 生产反馈(bili_audit.jsonl 19:10:12/19:12:29 两条 comment_drop,
+  why=off_topic):基准细节类草稿(64.9% RoboDojo/Carbon 分项,标题 Claude
+  Fable 5.2)只命中 'fable' 一个拉丁词、CJK 2-gram 零重叠,被静态兜底误杀。
+- **改动**:bili_ops.py `_topic_related` 拉丁规则 "命中 ≥2 实词" → "命中任一
+  **非虚词**实词"(虚词表 14 词:the/and/a/an/of/to/in/on/for/with/is/are/
+  vs/new),理由与不对称性论证记 docs/guard-rules.md §6。
+- **验证**:临时探针 `_calib_probe.py`(跑完已删)9 项断言全过 exit 0——t5 误杀
+  样本现放行、双拉丁命中仍过、零信号无关草稿仍拦(off_topic)、纯虚词重合不
+  放行、领域词路径不受影响、CJK 2-gram 路径不受影响、audit 归并含 comment_*、
+  reply 通道干净文本通过。首跑 5 项 FAIL 均为探针缺陷(用例短于 comment 30 字
+  下限,too_short 先于 topic 检查触发,非代码问题),补足字数后全绿。
+- **附带**:`py -3.12 -m py_compile bili_ops.py` 通过。`_load_audit_counts`
+  归并扩展(comment_skip/comment_drop/comment_budget_block→skip)已由协作
+  修复落盘,探针断言其在位。
+

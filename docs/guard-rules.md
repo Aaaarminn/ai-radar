@@ -31,7 +31,7 @@
 | L8 | `_WATER_RE` | `water_word` | `说得好|学到了?|学习了|前排|沙发|打卡|路过|[mM]ark|插眼|蹲一?个|帮顶|顶一?下|赞一?个|厉害了?|太强了?|火钳|三连|已关注|支持一?下|同问|自动回复|占楼|求三连|求关注|本鲸|白饭|贴贴|[rR]ua|捏捏|嗷呜|摸摸头` | 设计 §5.1 WATER_RE ∪ t11 `_REPLY_TONE_RE` 词条 |
 | L9 | `_AT_RE` | `has_at` | `@`(任何 @ 提及,防引流/对线@) | t9 新增 |
 | — | 字数 | `too_short` / `too_long` | 见 §3 通道矩阵 | reply 沿用旧 160 顶;comment 按设计 30-150 |
-| — | 相关性 | `off_topic` | comment 通道静态兜底 `_topic_related`:含领域词(ai/人工智能/大模型/gpt/llm/deepseek/claude/openai/英伟达/智能体/aigc/agi),或标题命中 ≥2 个拉丁实词,或与标题共享任一 CJK 2-gram → 相关;topic 为空不做兜底 | t9 新增(设计"频道相关性";LLM understand 相关性为主判定) |
+| — | 相关性 | `off_topic` | comment 通道静态兜底 `_topic_related`:含领域词(ai/人工智能/大模型/gpt/llm/deepseek/claude/openai/英伟达/智能体/aigc/agi),或标题命中任一**非虚词**拉丁实词(t5 生产校准 2026-11-12,原 ≥2 会误杀英文标题视频的基准细节类草稿;虚词表 the/and/a/an/of/to/in/on/for/with/is/are/vs/new),或与标题共享任一 CJK 2-gram → 相关;topic 为空不做兜底 | t9 新增(设计"频道相关性";LLM understand 相关性为主判定) |
 
 粗筛正则 **`BAD_TEXT_RE` = L1|L2|L3**(供 shrink/dynamic 通道与外部复用,
 = 旧 `_SHRINK_BAD_RE` 覆盖面 + claude-code 标记,只紧不松)。
@@ -71,6 +71,8 @@ L1-L3。
   不受影响;建议评论静态层直接 `from bili_ops import guard_text` 用
   `guard_text(text, 'comment', topic=视频标题)`,evidence 回查与 shingle 模板
   查重仍按设计留在 bili_comment 自身。
+  注(t5 实测 2026-11-12):bili-cli `comment check` 对 `--type draw` 恒返回
+  -404(评论存在),bili_comment.post_check 已加 `comment list` 兜底复核。
 
 ## 5. 兼容性保证(冒烟验证,见 [tests.md](tests.md))
 
@@ -93,6 +95,15 @@ L1-L3。
   会被 water_word 拦。裁量=维持——①「求三连|求关注」拉票形态已并存收录,收窄
   「三连」只放宽水评线、不增加召回;②复述点赞表态的草稿本身属低价值回复,拦下
   符合宁缺毋滥;③真实 inbox 同类误杀若高频,再议收窄(改 _WATER_RE 单点即可)。
+- 静态相关性拉丁阈值 2→1(t5 生产校准 2026-11-12):19:10/19:12 两条"基准细节
+  类"草稿被判 off_topic,其一(64.9% RoboDojo/Carbon 分项评论,标题 Claude
+  Fable 5.2)只命中 'fable' 一个拉丁词、CJK 2-gram 零重叠——英文标题视频
+  CJK 2-gram 常为零重叠,≥2 阈值系统性偏严。校准为命中任一**非虚词**拉丁实词
+  即相关(虚词表 14 词):静态兜底是放行型,假阳性由下游 LLM③ 复核兜住,假阴性
+  则该条评论被终审丢弃,不对称性支持放宽;零信号草稿仍拦(回归探针验证)。
+- `_load_audit_counts` 归并扩展(t5 提出integrator/合作修复 2026-11-12):
+  comment_skip/comment_drop/comment_budget_block 归入 skip,评论管线动作落
+  日报"被审核拦下"列(设计 §11 假设补齐)。
 
 ## 7. 重构 diff(t9 纯净 diff,相对任务开工前快照)
 

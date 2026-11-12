@@ -153,7 +153,13 @@ def _topic_related(text, topic):
     if any(w in t for w in _DOMAIN_WORDS):
         return True
     lat = re.findall(r'[a-z][a-z0-9+#.]{1,}', t)
-    if len([w for w in lat if w in tp]) >= 2:  # 标题命中≥2 个实词(容 and/the 虚词)
+    # 标题命中任一非虚词拉丁实词即相关(t5 校准 2026-11-12,阈值 2→1):
+    # 英文标题视频 CJK 2-gram 常为零重叠,≥2 会误杀基准细节类草稿(如标题
+    # Claude Fable 5.2 的 RoboDojo 分项评论只命中 'fable' 一个)。静态兜底为
+    # 放行型:假阳性由下游 LLM③ 复核兜住,假阴性则该条评论被终审丢弃。
+    stop = {'the', 'and', 'a', 'an', 'of', 'to', 'in', 'on', 'for', 'with',
+            'is', 'are', 'vs', 'new'}
+    if any(w in tp for w in lat if w not in stop):
         return True
     tg = set(m.group(1) for m in re.finditer(r'(?=([\u4e00-\u9fff]{2}))', t))
     bg = set(m.group(1) for m in re.finditer(r'(?=([\u4e00-\u9fff]{2}))', tp))
