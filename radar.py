@@ -880,7 +880,7 @@ def _dyn_publishable(it):
     if cjk < 200:
         return False
     nonws = len(re.sub(r'\s', '', ft))
-    if nonws and cjk / nonws < 0.6:             # 英文正文未译或夹杂过多
+    if nonws and cjk / nonws < 0.5:             # 英文正文未译或夹杂过多(0.5 容忍技术术语,仍拦英文未译)
         return False
     return True
 
@@ -1076,7 +1076,7 @@ def _bili_auto_publish(state, ship):
     script = os.path.join(BASE, 'bili_publish.py')
     try:
         r = subprocess.run(['py', '-3.12', script, 'send', '1'],
-                           capture_output=True, timeout=180)
+                           capture_output=True, timeout=420)   # 超长稿会先走 claude 压缩(~120s)再发布,180s 不够
         out = ((r.stdout or b'') + (r.stderr or b'')).decode('utf-8', 'replace')
     except Exception as e:  # noqa: BLE001
         print('[bili] 自动发布异常（不影响邮件主链路）:', e)

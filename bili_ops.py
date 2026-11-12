@@ -24,7 +24,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bili_publish import _run_bili  # noqa: E402  复用 bili-cli 通道
+from bili_publish import _run_bili, _claude_cli as _claude  # noqa: E402  复用 bili-cli 通道与 claude CLI
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 AUDIT = os.path.join(BASE, 'bili_audit.jsonl')
@@ -57,19 +57,6 @@ def _audit(action, detail):
     rec.update(detail)
     with open(AUDIT, 'a', encoding='utf-8') as f:
         f.write(json.dumps(rec, ensure_ascii=False) + '\n')
-
-
-def _claude(prompt, timeout=120):
-    """本机 claude CLI 起草文本;失败返回空串(调用方跳过该动作)"""
-    try:
-        r = subprocess.run(['powershell', '-NoProfile', '-File',
-                            r'D:\dev\npm-global\claude.ps1', '-p', prompt],
-                           capture_output=True, timeout=timeout)
-        out = ((r.stdout or b'') + (r.stderr or b'')).decode('utf-8', 'replace').strip()
-        return out
-    except Exception as e:  # noqa: BLE001
-        print('[ops] claude 起草失败:', e)
-        return ''
 
 
 def cmd_inbox():

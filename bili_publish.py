@@ -85,20 +85,94 @@ def _load_json(path, default):
         return default
 
 
+def _claude_cli(prompt, timeout=120):
+    """调本机 claude CLI(公司网关只放行 CLI);失败返回 ''。
+
+    prompt 必须走 stdin(-p 不带值时 claude 从 stdin 读)。
+    必须直调 claude.exe:经 claude.ps1 时其 "$input |" 管道在 PS 5.1 下
+    按 ANSI 代码页重编码 stdin,中文全变 '?',模型只收到问号(2026-11-12
+    端到端复现);直调 exe 字节直通,中文完好且快约 4 倍。
+    stderr 只打日志不进返回值:[claude-code:unrecognized_model] 是网关
+    警告,此前拼入正文会跟着压缩稿进动态,被 _quality_guard 拦 exit 4。"""
+    try:
+        r = subprocess.run(
+            [r'D:\dev\npm-global\node_modules\@anthropic-ai\claude-code\bin\claude.exe', '-p'],
+            input=prompt.encode('utf-8'), capture_output=True, timeout=timeout)
+        if r.stderr:
+            dbg = r.stderr.decode('utf-8', 'replace').strip()
+            if dbg:
+                print('[claude-cli] stderr: %s' % dbg[:200])
+        return (r.stdout or b'').decode('utf-8', 'replace').strip()
+    except Exception as e:
+        print('[shrink] claude CLI 调用失败: %s' % e)
+        return ''
+
+
+_SHRINK_BAD_RE = re.compile(
+    r'API Error[:：]|不安全或敏感内容|\uFFFD|[\uE000-\uF8FF]|[\x00-\x08\x0b\x0c\x0e-\x1f]'
+    r'|为您|帮你|作为一个AI|作为一名AI|仅供参考|希望这(?:篇|条|份|能)|祝你'
+    r'|(?:^|\n)\s*(?:以下是|好的[,，!！.。]|当然[,，!！])'
+    # LLM 元对话(如"编译稿没有传完整——我这边只收到了开头一句"):新闻正文绝不该出现
+    r'|编译稿|传(?:得)?完整|只收到|我这边|补写|编造|没法凭|无法凭|请提供|请把|贴给我'
+    r'|两个建议|建议(?:如下|一|二)|未收到|收到(?:的|了)?(?:开头|半截|部分)'
+    r'|我(?:无法|没法|不能)(?:凭|确认|完成)')
+
+
+def _shrink_body(body, limit):
+    """LLM 把编译稿压缩到 limit 字内的新闻摘要(保全部关键事实)。
+    返回压缩稿,不可信/失败返回 ''(调用方走兜底)。"""
+    prompt = (
+        '你是新闻编辑。把下面的 AI 新闻中文编译稿压缩成不超过 %d 字的完整新闻摘要：'
+        '保留全部关键事实(数字、人名、机构、时间线、结论与因果)，只删除次要细节和重复表述。'
+        '输出纯正文，不要标题、不要前言、不要任何解释或引号。\n\n%s' % (limit, body))
+    out = _claude_cli(prompt)
+    if not out or _SHRINK_BAD_RE.search(out):
+        if out:
+            print('[shrink] 压缩稿含异常文本,弃用')
+        return ''
+    cjk = len(re.findall(r'[\u4e00-\u9fff]', out))
+    nonws = len(re.sub(r'\s', '', out))
+    if cjk < 200 or (nonws and cjk / nonws < 0.5):   # 技术新闻英文术语多,0.6 会误伤;0.5 只拦"英文未译/夹生"
+        print('[shrink] 压缩稿中文占比/长度不足(cjk=%d),弃用' % cjk)
+        return ''
+    return out.strip()
+
+
+def _assemble(title, body, link, tags):
+    parts = [title, '', body, '', '原文: ' + link]
+    if tags:
+        parts += ['', tags]
+    return '\n'.join(parts)
+
+
 def _build_text(d, tags):
-    """候选条目 -> 动态全文(标题 + 全量编译稿 + 原文链接;tags 为空则不拼标签)"""
-    title = d.get('title_cn') or d.get('title') or '(无标题)'
+    """候选条目 -> 动态全文(标题 + 编译稿 + 原文链接;tags 为空则不拼标签)。
+
+    超长策略:正文先交给 LLM 压缩到一条动态装得下的量(用户要求"缩减到一次
+    动态能够包含的量");压缩失败才兜底截断,且只砍正文、链接行永远保留
+    (此前整串截断曾把"原文: 链接"砍掉,动态出现"见链接"却无链接)。"""
+    title = (d.get('title_cn') or d.get('title') or '(无标题)').strip()
     body = (d.get('full_text') or '').strip()
     if not body:
         body = (d.get('summary') or '').strip()
     if not body:
         body = '(编译稿缺失)'
-    parts = [title, '', body, '', '原文: ' + (d.get('link') or '')]
-    if tags:
-        parts += ['', tags]
-    text = '\n'.join(parts)
-    if len(text) > MAX_DYN_CHARS:
-        text = text[:MAX_DYN_CHARS - 3] + '…\n(以上内容因长度限制截断,原文见链接)'
+    link = (d.get('link') or '').strip()
+
+    text = _assemble(title, body, link, tags)
+    if len(text) <= MAX_DYN_CHARS:
+        return text
+
+    # 超长:给正文算预算(动态总长 - 标题 - 链接 - 结构字符,再留 10% 余量)
+    overhead = len(title) + len(link) + len('\n\n原文: \n') + (len(tags) + 2 if tags else 0)
+    budget = max(300, int((MAX_DYN_CHARS - overhead) * 0.95))
+    shrunk = _shrink_body(body, budget)
+    if shrunk:
+        text = _assemble(title, shrunk, link, tags)
+    if len(text) > MAX_DYN_CHARS:            # 压缩失败或仍超长:兜底截断正文,永保链接
+        keep = max(100, MAX_DYN_CHARS - overhead - 20)
+        body = body[:keep].rstrip() + '……'
+        text = _assemble(title, body, link, tags)
     return text
 
 
@@ -111,14 +185,19 @@ def _quality_guard(text):
         r'|\uFFFD|[\uE000-\uF8FF]'
         r'|[\x00-\x08\x0b\x0c\x0e-\x1f]'
         r'|为您|帮你|作为一个AI|作为一名AI|仅供参考|希望这(?:篇|条|份|能)|祝你'
-        r'|(?:^|\n)\s*(?:以下是|好的[,，!！.。]|当然[,，!！])')
+        r'|(?:^|\n)\s*(?:以下是|好的[,，!！.。]|当然[,，!！])'
+        # LLM 元对话/工具自述("编译稿没有传完整""我这边只收到…"):新闻正文绝不该出现
+        r'|编译稿|传(?:得)?完整|只收到|我这边|补写|编造|没法凭|无法凭|请提供|请把|贴给我'
+        r'|两个建议|建议(?:如下|一|二)|未收到|收到(?:的|了)?(?:开头|半截|部分)'
+        r'|我(?:无法|没法|不能)(?:凭|确认|完成)'
+        r'|claude-code:|\[claude-code')
     if bad.search(text):
         print('质量审核未通过: 检测到乱码/错误文本/助手腔')
         sys.exit(4)
     body = text.split('\n原文:')[0]           # 去掉尾部链接/标签,只审正文
     cjk = len(re.findall(r'[\u4e00-\u9fff]', body))
     nonws = len(re.sub(r'\s', '', body))
-    if cjk < 200 or (nonws and cjk / nonws < 0.6):
+    if cjk < 200 or (nonws and cjk / nonws < 0.5):   # 同上:0.5 阈值容忍技术术语,仍拦英文未译
         print('质量审核未通过: 正文中文占比/长度不足(cjk=%d nonws=%d)' % (cjk, nonws))
         sys.exit(4)
 
