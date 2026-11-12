@@ -44,7 +44,14 @@ _BILI_EXE_CANDIDATES = [
 
 
 def _bili_env():
-    env = {k: v for k, v in os.environ.items() if k.upper() != 'NO_PROXY'}
+    # 1) 本机 NO_PROXY 含裸 IPv6 字面量(::1/[::1])会引爆 httpx 的代理解析
+    #    (InvalidURL: Invalid port ':1]');
+    # 2) 走系统代理(127.0.0.1:7897)发动态会被 B 站重置(curl 56 Connection
+    #    reset,疑似代理把 api.vc.bilibili.com 分流到海外出口)。B 站国内
+    #    直连即可:把代理变量全部剥掉。
+    drop = {'NO_PROXY', 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+            'all_proxy', 'ALL_PROXY'}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
     env['NO_PROXY'] = 'localhost,127.0.0.1'
     return env
 
