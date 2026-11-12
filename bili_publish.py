@@ -15,6 +15,7 @@ bili_sent 记账由 radar.py 的 bili_check_replies 统一完成(避免双写冲
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -91,13 +92,34 @@ def _build_text(d, tags):
         body = (d.get('summary') or '').strip()
     if not body:
         body = '(编译稿缺失)'
-    parts = ['【AI雷达】' + title, '', body, '', '原文: ' + (d.get('link') or '')]
+    parts = ['【AI快讯】' + title, '', body, '', '原文: ' + (d.get('link') or '')]
     if tags:
         parts += ['', tags]
     text = '\n'.join(parts)
     if len(text) > MAX_DYN_CHARS:
         text = text[:MAX_DYN_CHARS - 3] + '…\n(以上内容因长度限制截断,原文见链接)'
     return text
+
+
+def _quality_guard(text):
+    """发布前最后一道审核(与 radar.py _dyn_publishable 同规则的独立实现,双保险):
+    拦乱码(替换符/PUA/控制字符)、错误/审查文本、助手腔,以及中文占比<60% 或
+    正文<200 字(英文正文未译/内容单薄)。不通过 exit 4。"""
+    bad = re.compile(
+        r'API Error[:：]|不安全或敏感内容'
+        r'|\uFFFD|[\uE000-\uF8FF]'
+        r'|[\x00-\x08\x0b\x0c\x0e-\x1f]'
+        r'|为您|帮你|作为一个AI|作为一名AI|仅供参考|希望这(?:篇|条|份|能)|祝你'
+        r'|(?:^|\n)\s*(?:以下是|好的[,，!！.。]|当然[,，!！])')
+    if bad.search(text):
+        print('质量审核未通过: 检测到乱码/错误文本/助手腔')
+        sys.exit(4)
+    body = text.split('\n原文:')[0]           # 去掉尾部链接/标签,只审正文
+    cjk = len(re.findall(r'[\u4e00-\u9fff]', body))
+    nonws = len(re.sub(r'\s', '', body))
+    if cjk < 200 or (nonws and cjk / nonws < 0.6):
+        print('质量审核未通过: 正文中文占比/长度不足(cjk=%d nonws=%d)' % (cjk, nonws))
+        sys.exit(4)
 
 
 def _get_draft(n):
@@ -136,13 +158,15 @@ def cmd_login():
 def cmd_preview_send(n, do_send):
     d = _get_draft(n)
     cfg = _load_json(os.path.join(BASE, 'config.json'), {})
-    tags = cfg.get('bili_tags', '#AI日报# #人工智能#')
+    tags = cfg.get('bili_tags', '#AI快讯# #科技新闻# #人工智能#')
     text = _build_text(d, tags)
     print('---- 动态全文(共 %d 字) ----' % len(text))
     print(text)
     print('----')
     if not do_send:
         return
+
+    _quality_guard(text)                      # 发布前最后审核:乱码/助手腔/中文占比,不过 exit 4
 
     tmp = os.path.join(tempfile.gettempdir(), 'bili_dyn_%d.txt' % int(time.time()))
     with open(tmp, 'w', encoding='utf-8') as f:

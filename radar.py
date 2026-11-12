@@ -853,6 +853,38 @@ def _shippable(it):
                 or _is_api_err(it.get('full_text') or ''))
 
 
+# ---- B站发布级审核（比上船更严）：干净的中文新闻体，防乱码/防助手腔 ----
+_DYN_BAD_RE = re.compile(
+    r'API Error[:：]|不安全或敏感内容'          # LLM 错误/审查文本
+    r'|\uFFFD|[\uE000-\uF8FF]'                  # 替换符/PUA 私有区字符 = 乱码
+    r'|[\x00-\x08\x0b\x0c\x0e-\x1f]'            # 控制字符（保留 \t \n \r）
+    r'|为您|帮你|作为一个AI|作为一名AI|仅供参考|希望这(?:篇|条|份|能)|祝你')
+_DYN_HEAD_BAD_RE = re.compile(r'^\s*(?:以下是|好的[,，!！.。]|当然[,，!！])')
+
+
+def _dyn_publishable(it):
+    """B站发布级审核：编译稿必须是干净的中文新闻体（定位=新闻发布，非个人助手对话）。
+    拦：错误/审查文本、乱码（替换符/PUA/控制字符）、助手腔（「以下是/为您/帮你」开头或穿插）、
+    中文占比<60%（英文正文未译）、正文<200字。"""
+    ft = it.get('full_text') or ''
+    tc = it.get('title_cn') or ''
+    if not ft or not tc:
+        return False
+    if _is_api_err(ft) or _is_api_err(tc):
+        return False
+    if _DYN_BAD_RE.search(ft) or _DYN_BAD_RE.search(tc):
+        return False
+    if _DYN_HEAD_BAD_RE.match(ft):
+        return False
+    cjk = len(re.findall(r'[\u4e00-\u9fff]', ft))
+    if cjk < 200:
+        return False
+    nonws = len(re.sub(r'\s', '', ft))
+    if nonws and cjk / nonws < 0.6:             # 英文正文未译或夹杂过多
+        return False
+    return True
+
+
 # ---------------------------------------------------------------- 主题聚类（同一事件多条报道 -> 一条）
 CLUSTER_PRIORITY = ['gpt', 'astra', 'fable', 'claude', 'gemini', 'gemma', 'glm', 'qwen',
                     'deepseek', 'kimi', 'grok', 'llama', 'minimax', 'mistral', 'sora',
@@ -1023,11 +1055,11 @@ def _bili_auto_publish(state, ship):
     pool = [p for p in ship
             if (p.get('influence') or 0) >= BILI_MIN_INFLUENCE
             and (p.get('score') or 0) >= MIN_SCORE
-            and _shippable(p)
+            and _dyn_publishable(p)                 # 发布级审核：干净中文新闻体,防乱码
             and (p.get('title_cn') or '')
             and (p.get('title_cn') or p.get('title') or '') not in sent_keys]
     if not pool:
-        print('[bili] 本批无影响力>=%d 的合格条目，不发布B站动态。' % BILI_MIN_INFLUENCE)
+        print('[bili] 本批无影响力>=%d 且通过发布审核的条目，不发布B站动态。' % BILI_MIN_INFLUENCE)
         return None
     pool.sort(key=lambda p: (p.get('influence') or 0, p.get('score') or 0), reverse=True)
     p = pool[0]
