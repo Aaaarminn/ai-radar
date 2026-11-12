@@ -22,13 +22,16 @@ B站账号 NImraaaa(mid 3747582327131132,「AI 领域资讯编译与信息同步
 | 任务 | 节奏 | 命令 | 安装脚本 |
 |---|---|---|---|
 | AI-Radar-Eval | 每 2h :45 | `radar.py --eval-only` | `install-task.ps1` |
-| AI-Radar-Send | 每 2h 整点 | `radar.py --send-only` | `install-task.ps1` |
+| AI-Radar-Send | 每 4h 整点(13 点起) | `radar.py --send-only` | `install-task.ps1` |
 | AI-Radar-BiliInbox | 每 4h(8:17 起) | `bili_ops.py inbox` | - |
 | AI-Radar-BiliPatrol-AM | 每日 11:17 | `bili_ops.py patrol` | - |
-| AI-Radar-BiliPatrol-PM | 每日 20:17 | `bili_ops.py patrol` | - |
-| AI-Radar-Comment | 每 2h :15 | `py -3.12 bili_comment.py run` | `install-comment-task.ps1` |
+| AI-Radar-BiliPatrol-PM | 每日 20:47 | `bili_ops.py patrol` | - |
+| AI-Radar-Comment-AM | 每日 11:53 | `py -3.12 bili_comment.py run` | `docs/rhythm.md §7` |
+| AI-Radar-Comment-PM | 每日 21:33 | `py -3.12 bili_comment.py run` | `docs/rhythm.md §7` |
 
-卸载评论任务:`schtasks /Delete /TN AI-Radar-Comment /F`。
+评论任务已从「每 2h :15」改为每日两班(午 11:53/晚 21:33,错峰于巡逻后),patrol-PM 从 20:17 移至 20:47 错开 inbox——理由与回滚见 `docs/rhythm.md`。
+
+卸载评论两班任务:`schtasks /Delete /TN AI-Radar-Comment-AM /F` + `schtasks /Delete /TN AI-Radar-Comment-PM /F`。
 
 ## 3. patrol 巡查(t6 整合评论链)
 
