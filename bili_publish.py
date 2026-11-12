@@ -177,17 +177,30 @@ def _trim_to_sentence(text, budget):
     """把 text 裁进 budget,裁点选预算内最后一个完整句末标点(。！？!?\n)。
 
     取代旧的 body[:keep]+'……' 字符截断——那是首条动态尾部出现
-    『有没有真实生产客户』目…… 半句的根因。预算内找不到句末标点
-    (极端情况)才退回硬截+省略号。"""
+    『有没有真实生产客户』目…… 半句的根因。优先句末标点;预算内没有
+    句末标点时退而求其次取逗号/分号边界(≥预算一半);仍没有才硬截,
+    且硬截点回退到最近的非字母数字边界,避免把英文单词/URL 撕成碎片。"""
     if len(text) <= budget:
         return text
     cut = text[:budget]
     end = None
     for m in re.finditer(r'[。！？!?\n]', cut):
         end = m
-    if end and end.end() >= 120:        # 至少保留 120 字,防止裁得太短
+    if end:                              # 完整句子优先:短而完整好过长而残缺
         return cut[:end.end()].rstrip()
-    return cut.rstrip() + '……'
+    m2 = None                            # 次选:逗号/分号边界(至少保留一半预算)
+    for mm in re.finditer(r'[，,、;；]', cut):
+        if mm.end() >= budget // 2:
+            m2 = mm
+            break
+    if m2:
+        return cut[:m2.start()].rstrip(' ,，、;；:：') + '……'
+    m = None                             # 硬截兜底:回退到最近非字母数字边界
+    for mm in re.finditer(r'[A-Za-z0-9_\-./]+[A-Za-z0-9_\-./]', cut):
+        m = mm
+    if m and m.start() >= 30:
+        cut = cut[:m.start()]
+    return cut.rstrip(' ,，、;；:：') + '……'
 
 
 def _assemble(title, body, link, tags):
