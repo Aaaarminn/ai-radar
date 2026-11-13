@@ -63,8 +63,8 @@ except Exception:
     pass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# 通道层必须复用 bili_publish(设计 §1.2):bili-cli 干净 env 调用 / claude CLI / JSON 读取
-from bili_publish import (_run_bili, _bili_env, _find_bili, _claude_cli,  # noqa: E402,F401
+# 通道层必须复用 bili_publish(设计 §1.2):bili-cli 自适应网络通道 / claude CLI / JSON 读取
+from bili_publish import (_run_bili, _direct_env, _find_bili, _claude_cli,  # noqa: E402,F401
                           _load_json)
 # 审计 + 轻审核正则复用 bili_ops(_REPLY_BAD_RE 供后续审核层使用)
 from bili_ops import _audit, _REPLY_BAD_RE  # noqa: E402,F401

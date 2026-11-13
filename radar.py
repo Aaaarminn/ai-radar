@@ -861,11 +861,19 @@ _DYN_BAD_RE = re.compile(
     r'|为您|帮你|作为一个AI|作为一名AI|仅供参考|希望这(?:篇|条|份|能)|祝你')
 _DYN_HEAD_BAD_RE = re.compile(r'^\s*(?:以下是|好的[,，!！.。]|当然[,，!！])')
 
+# B站敏感题材层(2026-11-13 实证:黄仁勋"辞职+中国间谍丑闻"动态被 B 站 4101152
+# 仅自见下架)。涉政/桃色/司法调查类内容在 B 站动态审核几乎是必拦项,这类新闻
+# 邮件照发,但不再上 B 站。注意只拦"题材词",不拦人名本身(否则英伟达财报全灭)。
+_DYN_SENS_RE = re.compile(
+    r'间谍|丑闻|婚外|出轨|情妇|罢免|弹劾|逮捕|泄密|传票|起诉书|认罪'
+    r'|制裁|关税|出口管制|实体清单|军事|台海|军事冲突'
+    r'|特朗普要求|白宫施压|国会调查')
+
 
 def _dyn_publishable(it):
     """B站发布级审核：编译稿必须是干净的中文新闻体（定位=新闻发布，非个人助手对话）。
     拦：错误/审查文本、乱码（替换符/PUA/控制字符）、助手腔（「以下是/为您/帮你」开头或穿插）、
-    中文占比<60%（英文正文未译）、正文<200字。"""
+    中文占比<60%（英文正文未译）、正文<200字、涉政/桃色/司法敏感题材（B站动态必拦）。"""
     ft = it.get('full_text') or ''
     tc = it.get('title_cn') or ''
     if not ft or not tc:
@@ -875,6 +883,8 @@ def _dyn_publishable(it):
     if _DYN_BAD_RE.search(ft) or _DYN_BAD_RE.search(tc):
         return False
     if _DYN_HEAD_BAD_RE.match(ft):
+        return False
+    if _DYN_SENS_RE.search(tc) or _DYN_SENS_RE.search(ft[:400]):
         return False
     cjk = len(re.findall(r'[\u4e00-\u9fff]', ft))
     if cjk < 200:
@@ -1047,6 +1057,10 @@ def _bili_auto_publish(state, ship):
     返回邮件 footer (plain, html)（发布通知），未发布/失败返回 None（失败仅记日志）。"""
     if not BILI_ENABLED or not ship:
         return None
+    today = time.strftime('%Y-%m-%d')
+    if today in (state.get('bili_halt_days') or []):
+        print('[bili] 今日已被判内容风控停发（动态仅自见过），跳过。')
+        return None
     today_n = _bili_today_count(state)
     if today_n >= BILI_MAX_PER_DAY:
         print('[bili] 今日发布额度已用完（%d/%d），跳过自动发布。' % (today_n, BILI_MAX_PER_DAY))
@@ -1076,7 +1090,7 @@ def _bili_auto_publish(state, ship):
     script = os.path.join(BASE, 'bili_publish.py')
     try:
         r = subprocess.run(['py', '-3.12', script, 'send', '1'],
-                           capture_output=True, timeout=420)   # 超长稿会先走 claude 压缩(~120s)再发布,180s 不够
+                           capture_output=True, timeout=600)   # claude压缩(~200s)+发布+可见性复核(sleep 150s)
         out = ((r.stdout or b'') + (r.stderr or b'')).decode('utf-8', 'replace')
     except Exception as e:  # noqa: BLE001
         print('[bili] 自动发布异常（不影响邮件主链路）:', e)
@@ -1100,6 +1114,13 @@ def _bili_auto_publish(state, ship):
                 '<a href="%s" style="color:#fb7299;">《%s》</a></div>'
                 % (_esc(dyn_url) or '#', _esc(title[:40]))) if dyn_url else None
         return (plain, html)
+    if r.returncode == 6:
+        # 发布后被 B 站判仅自见(4101152),子进程已自动删除;当日停发,明日再试
+        state['bili_halt_days'] = list(set((state.get('bili_halt_days') or [])[-30:] + [today]))
+        save_state(state)
+        print('[bili] 动态被判仅自见已自动删除，今日停发B站（邮件不受影响）。')
+        plain = '⚠️ 今日B站动态发布后被判"仅自见"已自动撤下，今日停发观察（邮件正常）。'
+        return (plain, None)
     print('[bili] 自动发布失败(exit=%d)：%s' % (r.returncode, out.strip()[-300:]))
     save_state(state)
     return None

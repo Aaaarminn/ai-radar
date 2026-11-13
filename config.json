@@ -24,5 +24,6 @@
   "comment_up_daily_max": 1,
   "comment_keyword_blacklist": [
     "时政|时局|时评|八卦|热搜|吃瓜|爆料|绯闻|开撕|互撕|黄仁勋|马斯克|特朗普|拜登|奥巴马|普京|泽连斯基"
-  ]
+  ],
+  "bili_network": "auto"
 }

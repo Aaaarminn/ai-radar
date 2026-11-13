@@ -45,17 +45,35 @@ _BILI_EXE_CANDIDATES = [
 ]
 
 
-def _bili_env():
+def _direct_env():
     # 1) 本机 NO_PROXY 含裸 IPv6 字面量(::1/[::1])会引爆 httpx 的代理解析
     #    (InvalidURL: Invalid port ':1]');
-    # 2) 走系统代理(127.0.0.1:7897)发动态会被 B 站重置(curl 56 Connection
-    #    reset,疑似代理把 api.vc.bilibili.com 分流到海外出口)。B 站国内
-    #    直连即可:把代理变量全部剥掉。
+    # 2) 剥掉全部代理变量 = B 站国内直连(2026-11-12 实测走系统代理发动态会被
+    #    重置 curl 56;2026-11-13 上午起直连反而被网络侧阻断——所以不能写死,
+    #    由 _run_bili 按 config bili_network 自适应)。
     drop = {'NO_PROXY', 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
             'all_proxy', 'ALL_PROXY'}
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env['NO_PROXY'] = 'localhost,127.0.0.1'
     return env
+
+
+def _proxy_env():
+    # 保留系统代理变量(但剥掉会引爆 httpx 的裸 IPv6 NO_PROXY)。
+    env = {k: v for k, v in os.environ.items() if k.upper() != 'NO_PROXY'}
+    env['NO_PROXY'] = 'localhost,127.0.0.1'
+    return env
+
+
+def _network_order():
+    """config bili_network: auto(默认)=先直连失败换代理;direct/proxy 单通道。"""
+    cfg = _load_json(os.path.join(BASE, 'config.json'), {})
+    mode = cfg.get('bili_network', 'auto')
+    if mode == 'direct':
+        return [_direct_env()]
+    if mode == 'proxy':
+        return [_proxy_env()]
+    return [_direct_env(), _proxy_env()]
 
 
 def _find_bili():
@@ -67,14 +85,25 @@ def _find_bili():
 
 
 def _run_bili(args, timeout=180):
-    r = subprocess.run([_find_bili()] + args, capture_output=True,
-                       env=_bili_env(), timeout=timeout)
-    out = (r.stdout or b'').decode('utf-8', 'replace')
-    try:
-        payload = json.loads(out)
-    except Exception:
-        payload = None
-    return r.returncode, payload, out
+    """按 bili_network 顺序尝试网络通道:仅网络错误(code=network_error)才切换,
+    业务错误(风控码等)原样返回——绝不带着风控码换通道重打,避免加重风控。"""
+    last = (1, None, '')
+    for env in _network_order():
+        r = subprocess.run([_find_bili()] + args, capture_output=True,
+                           env=env, timeout=timeout)
+        out = (r.stdout or b'').decode('utf-8', 'replace')
+        try:
+            payload = json.loads(out)
+        except Exception:
+            payload = None
+        last = (r.returncode, payload, out)
+        is_net_err = bool(payload and payload.get('ok') is False
+                          and (payload.get('error') or {}).get('code') == 'network_error')
+        if not is_net_err:
+            return last
+        print('[bili] 通道网络失败(%s),尝试下一通道' % (
+            ((payload.get('error') or {}).get('message') or '')[:60]))
+    return last
 
 
 def _load_json(path, default):
@@ -208,8 +237,20 @@ def _trim_to_sentence(text, budget):
     return cut.rstrip(' ,，、;；:：') + '……'
 
 
+def _plain_source(link):
+    """外链文本化:去协议头(https:// / http:// / www.)。
+
+    2026-11-13 实证:D-Day 动态(纯文本长动态+站外裸链接)被 B 站仅自见
+    (shadowban),站外 URL 是新号动态的高危特征。降险:动态里不再放可
+    点击链接,只保留来源文本(可读、可搜索);复核层(_verify_visible)
+    兜底,真被拦自动删。"""
+    return re.sub(r'^https?://(www\.)?', '', link.strip())
+
+
 def _assemble(title, body, link, tags):
-    parts = [title, '', body, '', '原文: ' + link]
+    parts = [title, '', body]
+    if link:
+        parts += ['', '来源: ' + _plain_source(link)]
     if tags:
         parts += ['', tags]
     return '\n'.join(parts)
@@ -234,7 +275,7 @@ def _build_text(d, tags):
         return text
 
     # 超长:给正文算预算(动态总长 - 标题 - 链接 - 结构字符,再留 10% 余量)
-    overhead = len(title) + len(link) + len('\n\n原文: \n') + (len(tags) + 2 if tags else 0)
+    overhead = len(title) + len(link) + len('\n\n来源: \n') + (len(tags) + 2 if tags else 0)
     budget = max(300, int((MAX_DYN_CHARS - overhead) * 0.95))
     shrunk = _shrink_body(body, budget)
     if shrunk and len(shrunk) > budget:
@@ -261,7 +302,7 @@ def _quality_guard(text):
     if not bad[0]:
         print('质量审核未通过: 检测到乱码/错误文本/助手腔(%s: %s)' % (bad[1], bad[2]))
         sys.exit(4)
-    body = text.split('\n原文:')[0]           # 去掉尾部链接/标签,只审正文
+    body = text.split('\n来源:')[0]           # 去掉尾部来源/标签,只审正文
     cjk = len(re.findall(r'[\u4e00-\u9fff]', body))
     nonws = len(re.sub(r'\s', '', body))
     if cjk < 200 or (nonws and cjk / nonws < 0.5):   # 同上:0.5 阈值容忍技术术语,仍拦英文未译
@@ -302,6 +343,30 @@ def cmd_login():
     sys.exit(2)
 
 
+def _verify_visible(dyn_id):
+    """发布后可见性复核:B站新号动态会被"仅自己可见"(shadowban),且发布
+    接口照样返回成功(2026-11-13 实证:D-Day/黄仁勋两条,其他账号不可见,
+    show 报 4101152 动态不可见)。发布后等审核落定再拉一次 show:
+    - 明确 4101152 → 自动删除 + exit 6(radar 侧当日停发);
+    - 其他任何结果(ok / 网络失败 / 未知码)→ 不判死,宁可漏判不可误删。
+    """
+    time.sleep(150)                            # 等 B 站异步审核落定(约1-2分钟)
+    for _ in range(2):
+        rc, payload, out = _run_bili(['dynamic', 'show', dyn_id], timeout=60)
+        err = (payload or {}).get('error') or {}
+        code = err.get('detail', {}).get('bili_code') if isinstance(err.get('detail'), dict) else None
+        if code == 4101152:
+            print('[verify] 动态被判仅自见(4101152),自动删除: %s' % dyn_id)
+            _run_bili(['dynamic', 'delete', dyn_id], timeout=60)
+            print('dyn_hidden=1')
+            sys.exit(6)
+        if payload and payload.get('ok'):
+            print('[verify] 可见性复核通过(正常展示)')
+            return
+        print('[verify] 复核查询未决(%s),不判死' % str(err.get('code') or out)[:80])
+        time.sleep(10)
+
+
 def cmd_preview_send(n, do_send):
     d = _get_draft(n)
     cfg = _load_json(os.path.join(BASE, 'config.json'), {})
@@ -336,6 +401,7 @@ def cmd_preview_send(n, do_send):
         print('发布成功: %s' % json.dumps(data, ensure_ascii=False)[:200])
         if dyn_id:
             print('dyn_url=https://t.bilibili.com/%s' % dyn_id)
+            _verify_visible(dyn_id)        # 仅自见(4101152)→自动删+exit 6
         return
     print('发布失败: %s' % out.strip()[:300])
     sys.exit(3)
