@@ -189,10 +189,20 @@ def _norm_video_items(p):
     return out
 
 
+# 发现层 AI 域词预筛(标题小写子串匹配;与 bili_ops.LIKE_DOMAIN_WORDS 同源,
+# 发现层实测补充机器学习/深度学习等;宽匹配可容忍,LLM① 理解层仍兜底判域)
+_DOMAIN_WORDS = ('ai', '人工智能', '大模型', 'gpt', 'llm', 'deepseek', 'claude',
+                 'openai', 'gemini', 'anthropic', '英伟达', '智能体', 'aigc', 'agi',
+                 '机器学习', '深度学习', '神经网络', '大语言模型', 'chatgpt', 'sora',
+                 'qwen', '通义', '豆包', 'kimi', 'grok', 'mistral', 'llama')
+
+
 def discover_candidates(st):
     """轮换关键词搜索 + 科技区热榜,合并去重后过滤(设计 §9.3)。
     st 为 comment_state 字典(含 seen: {bvid:...});同视频永久去重。
-    UP mid 黑白名单与 auto 白名单在 fetch_context(info 拿到 mid)后判定。"""
+    UP mid 黑白名单与 auto 白名单在 fetch_context(info 拿到 mid)后判定。
+    2026-11-13 加标题域词预筛(t7 问题②:科技区热榜会捞进装修/维修等非 AI 域
+    视频,LLM① 再判域纯烧时——标题不含 AI 域词的直接在发现层拦下)。"""
     kw = DISCOVER_KEYWORDS[int(time.time() // 86400) % len(DISCOVER_KEYWORDS)]
     out = []
     rc, p, _ = _run_bili(['search', 'video', kw, '--order', 'new', '--size', '15'], timeout=60)
@@ -207,6 +217,9 @@ def discover_candidates(st):
             continue
         seen_bv.add(c['bvid'])
         if _title_hit_blacklist(c['title']):
+            continue
+        tl = c['title'].lower()
+        if not any(w in tl for w in _DOMAIN_WORDS):    # AI 域词预筛(热榜杂类视频在此拦下)
             continue
         if c['pubdate'] and now - c['pubdate'] > VIDEO_MAX_AGE_DAYS * 86400:
             continue
@@ -371,6 +384,7 @@ def _fetch_context_detailed(bvid):
         _audit('comment_skip', {'bvid': bvid, 'why': 'title_blacklist'})
         return None, 'title_blacklist'
     if str(CONFIG.get('comment_mode') or '') == 'auto' and up_mid and \
+            not CONFIG.get('comment_open_all') and \
             up_mid not in _cfg_list('comment_whitelist_up'):
         _audit('comment_skip', {'bvid': bvid, 'why': 'not_whitelisted', 'up_mid': up_mid})
         return None, 'not_whitelisted'
@@ -1002,6 +1016,76 @@ def publish(target, text, dry_run=False):
     return _extract_rpid(payload, out), ''
 
 
+def _watch_video(bvid, seconds=75):
+    """真发评论前轻量观看(click → 心跳 → 观看历史)。
+    目的不是刷播放:①"评论前看过"让账号行为更自然(只评不看是机器人显著特征);
+    ②顺带帮 UP 计一次真实播放(用户意图"增加视频的观看量";接口有 200播放/账号/日
+    限制,评论预算≤5条/日 远低于上限)。任何失败静默跳过——观看是佐料,绝不阻塞评论。"""
+    try:
+        import httpx
+        cred = _load_json(os.path.join(os.environ.get('APPDATA', ''), 'bili-cli',
+                                       'credential.json'), {})
+        cookies = {k: cred[k] for k in ('SESSDATA', 'bili_jct', 'DedeUserID', 'buvid3')
+                   if cred.get(k)}
+        for k in ('buvid4', 'ac_time_value'):
+            if cred.get(k):
+                cookies[k] = cred[k]
+        csrf = cred.get('bili_jct') or ''
+        mid = int(cred.get('dedeuserid') or 0)
+        ua = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36')
+        v = None
+        cli = None
+        for px in (None, 'http://127.0.0.1:7897'):   # 网络自适应:先直连失败换代理(同 bili_network=auto)
+            try:
+                cli = httpx.Client(headers={'User-Agent': ua,
+                                            'Referer': 'https://www.bilibili.com/'},
+                                   cookies=cookies, timeout=8.0, proxy=px)
+                v = cli.get('https://api.bilibili.com/x/web-interface/view',
+                            params={'bvid': bvid}).json()
+                if v.get('code') == 0:
+                    break
+            except Exception:                         # noqa: BLE001
+                continue
+        if not v or v.get('code') != 0:
+            print('[watch] 取视频信息失败,跳过观看')
+            return
+        d = v['data']
+        aid, cid, dur = d['aid'], d['pages'][0]['cid'], d['duration']
+        cli.timeout = httpx.Timeout(20.0)
+        import uuid as _uuid
+        now = int(time.time())
+        sess = _uuid.uuid4().hex
+        cli.post('https://api.bilibili.com/x/click-interface/click/web/h5', data={
+            'mid': mid, 'aid': aid, 'cid': cid, 'part': 1, 'lv': 2,
+            'ftime': now, 'stime': now, 'type': 3, 'sub_type': 0,
+            'outer': 0, 'spmid': '333.788.0.0', 'from_spmid': '',
+            'session': sess, 'csrf': csrf})
+
+        def _hb(played, play_type):
+            return cli.post('https://api.bilibili.com/x/click-interface/web/heartbeat', data={
+                'aid': aid, 'bvid': bvid, 'cid': cid, 'mid': mid,
+                'played_time': played, 'realtime': played, 'real_played_time': played,
+                'video_duration': dur, 'last_play_progress_time': played,
+                'max_play_progress_time': played, 'start_ts': now,
+                'type': 3, 'sub_type': 0, 'dt': 2, 'play_type': play_type,
+                'quality': 64, 'referer_url': 'https://www.bilibili.com/',
+                'spmid': '333.788.0.0', 'session': sess, 'csrf': csrf}).json()
+
+        _hb(0, 1)
+        played = 0
+        while played < seconds:
+            time.sleep(15)
+            played += 15
+            _hb(played, 0)
+        _hb(played, 4)
+        cli.post('https://api.bilibili.com/x/v2/history/report', data={
+            'aid': aid, 'cid': cid, 'progress': played, 'platform': 'web', 'csrf': csrf})
+        print('[watch] 观看完成(%s, %ds)' % (bvid, played))
+    except Exception as e:                             # noqa: BLE001
+        print('[watch] 观看失败(不影响评论): %s' % e)
+
+
 def _handle_publish_err(err, st, bvid, up_mid):
     """发布失败兜底(设计 §8 矩阵)。返回应透传的退出码;None=候选级失败(调用方 continue)。
     账号级:-352/-412/-509/12015/12016 → 硬停 30min;captcha → 人工 resume;
@@ -1287,6 +1371,7 @@ def _pipeline_one(cand, mode, st, reuse_study=False):
     target = {'bvid': bvid}
     if draft.get('reply_to'):
         target.update(draft['reply_to'])
+    _watch_video(bvid)                    # 真发前轻量观看 75s:行为自然度+计播放(2026-11-13 用户意图)
     rpid, err = publish(target, draft['text'])
     if err:
         rc = _handle_publish_err(err, st, bvid, ctx.get('up_mid') or '')
